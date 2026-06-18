@@ -254,6 +254,45 @@ function freqToNote(f) {
   return { name, octave, cents };
 }
 
+/* ------------------------ modo jogo (helpers) --------------------- */
+const HIT_PRE = 0.6, HIT_POST = 0.6; // janela de acerto (s): antes/depois do tempo do acorde
+const TIME_TOKEN_RE = /^\[\d{1,2}:\d{2}(?:\.\d+)?\]$/;
+
+// garante um espaço após cada marcador [mm:ss] (facilita tokenizar)
+function normalizeTimes(text) {
+  return (text || "").replace(/(\[\d{1,2}:\d{2}(?:\.\d+)?\])(?=\S)/g, "$1 ");
+}
+// remove os marcadores de tempo para exibição limpa da cifra
+function stripTimes(text) {
+  return (text || "").replace(/\[\d{1,2}:\d{2}(?:\.\d+)?\]\s?/g, "");
+}
+// classe de altura (0-11) da fundamental de um acorde
+function chordRootPC(chord) {
+  const p = parseChord(chord); if (!p) return null;
+  const i = NOTE_TO_I[p.root]; return i == null ? null : i;
+}
+// monta a timeline do jogo a partir dos marcadores [mm:ss] (ordem do documento)
+function buildChart(body, shift) {
+  const text = normalizeTimes(body);
+  const re = /\[(\d{1,2}):(\d{2}(?:\.\d+)?)\]\s*(\(?[A-G][#b]?[^\s\]]*)/g;
+  const out = []; let m;
+  while ((m = re.exec(text))) {
+    const t = parseInt(m[1], 10) * 60 + parseFloat(m[2]);
+    const shifted = transposeToken(m[3], shift);
+    const pc = chordRootPC(shifted);
+    if (pc == null) continue;
+    out.push({ idx: out.length, t, chord: shifted, pc });
+  }
+  return out;
+}
+// nota final a partir da porcentagem de acertos
+function gradeFor(pct) {
+  if (pct >= 90) return { letter: "A", label: "Lendário!", color: "#7BC47F" };
+  if (pct >= 75) return { letter: "B", label: "Muito bom", color: "#79B7A6" };
+  if (pct >= 50) return { letter: "C", label: "Precisa treinar o ritmo", color: "#F0A833" };
+  return { letter: "D", label: "Bora ensaiar mais um pouco", color: "#E0683C" };
+}
+
 /* ----------------------------- sample ----------------------------- */
 const SAMPLE = `Título: Boas-vindas (Demo)
 [Intro] C  G  Am  F
@@ -284,7 +323,20 @@ Segue firme nessa canção
 D            C        G
 Vou pela estrada a cantarolar
 D           C         G
-Sem pressa alguma de chegar`;
+Sem pressa alguma de chegar
+
+---
+
+Título: Treino de Ritmo (Modo Jogo)
+[Intro]
+[00:01] Em      [00:03] C
+Toque cada acorde quando ele passar na linha
+[00:05] G       [00:07] D
+Siga o cronômetro, capriche no tempo
+[00:09] Em      [00:11] C
+Verde é acerto, vermelho é perdeu
+[00:13] G       [00:15] D
+No fim aparece a sua nota`;
 
 /* ----------------------------- CSS -------------------------------- */
 const CSS = `
@@ -314,7 +366,11 @@ const CSS = `
 .palco-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;width:18px;height:18px;border-radius:50%;background:${C.amber};border:3px solid ${C.bg};box-shadow:0 0 0 1px ${C.amberDeep};cursor:grab;}
 .palco-range::-moz-range-thumb{width:14px;height:14px;border-radius:50%;background:${C.amber};border:3px solid ${C.bg};cursor:grab;}
 .palco-btn:focus-visible,.palco-range:focus-visible,.palco-song:focus-visible,.palco-album:focus-visible{outline:2px solid ${C.amber};outline-offset:2px;}
-@media (prefers-reduced-motion: reduce){.palco-btn,.palco-chev{transition:none!important;}}
+.palco-ev{transition:color .12s ease, background .12s ease;border-radius:4px;}
+.palco-ev-active{text-decoration:underline;text-underline-offset:4px;}
+.palco-ev-hit{background:rgba(123,196,127,.20);}
+.palco-ev-miss{background:rgba(224,104,60,.20);}
+@media (prefers-reduced-motion: reduce){.palco-btn,.palco-chev,.palco-ev{transition:none!important;}}
 `;
 
 /* ============================== APP =============================== */
@@ -347,7 +403,22 @@ export default function Palco() {
   const [popover, setPopover] = useState(null); // {name, left, top, place}
   const [tunerOpen, setTunerOpen] = useState(false);
 
+  // ----- Modo Jogo -----
+  const [mode, setMode] = useState("free");                       // "free" | "game"
+  const [game, setGame] = useState({ phase: "idle" });            // idle | countdown | playing | finished | denied | unsupported
+  const [gScore, setGScore] = useState({ hits: 0, total: 0, status: [] });
+  const [gActive, setGActive] = useState(-1);
+  const [gFlash, setGFlash] = useState(null);                     // {idx, kind: "hit"|"miss"}
+
   const scrollRef = useRef(null), rafRef = useRef(null), accRef = useRef(0), fileInputRef = useRef(null);
+  const gAudioRef = useRef(null);     // {ctx, stream, analyser, buf}
+  const gRafRef = useRef(null);       // requestAnimationFrame do jogo
+  const gClockRef = useRef({ t0: 0 }); // relógio (segundos)
+  const gRunRef = useRef(0);          // token p/ invalidar loops antigos
+  const chartRef = useRef([]);        // snapshot da timeline em jogo
+  const targetRef = useRef(0);        // índice do próximo acorde a resolver
+  const eventEls = useRef([]);        // refs DOM dos acordes-alvo (p/ medir Y)
+  const eventY = useRef([]);          // posição Y medida de cada alvo
 
   useEffect(() => {
     const link = document.createElement("link");
@@ -425,12 +496,20 @@ export default function Palco() {
   const displayShift = transpose - capo;
   const renderedLines = useMemo(() => {
     if (!selectedSong) return [];
-    return selectedSong.body.split("\n").map((line, i) => ({ key: i, text: line, kind: classifyLine(line) }));
+    return selectedSong.body.split("\n").map((line, i) => {
+      const raw = normalizeTimes(line);   // mantém [mm:ss] (usado pelo Modo Jogo)
+      const text = stripTimes(raw);        // versão limpa (exibição)
+      return { key: i, raw, text, kind: classifyLine(text) };
+    });
   }, [selectedSong]);
+
+  // timeline do jogo (acordes com tempo), já com transpose/capo aplicados
+  const chart = useMemo(() => (selectedSong ? buildChart(selectedSong.body, displayShift) : []), [selectedSong, displayShift]);
+  const hasChart = chart.length > 0;
 
   const maxChars = useMemo(() => {
     if (!selectedSong) return 0;
-    return selectedSong.body.split("\n").reduce((m, l) => Math.max(m, l.length), 1);
+    return selectedSong.body.split("\n").reduce((m, l) => Math.max(m, stripTimes(normalizeTimes(l)).length), 1);
   }, [selectedSong]);
   const fitSize = useMemo(() => {
     if (!containerW || !maxChars) return fontSize;
@@ -552,6 +631,132 @@ export default function Palco() {
     for (const al of library.albums) al.songs.forEach((s, i) => { if (s.title.toLowerCase().includes(q) || al.name.toLowerCase().includes(q)) out.push({ albumId: al.id, albumName: al.name, idx: i, title: s.title }); });
     return out.slice(0, 60);
   }, [query, library]);
+
+  /* ===================== Modo Jogo: controle ===================== */
+  const stopGameAudio = () => {
+    if (gRafRef.current) { cancelAnimationFrame(gRafRef.current); gRafRef.current = null; }
+    const a = gAudioRef.current;
+    if (a) {
+      try { a.stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+      try { if (a.ctx.state !== "closed") a.ctx.close(); } catch (e) {}
+    }
+    gAudioRef.current = null;
+  };
+  const stopGame = () => { gRunRef.current++; stopGameAudio(); setGame({ phase: "idle" }); setGActive(-1); setGFlash(null); targetRef.current = 0; };
+  const switchMode = (m) => {
+    if (m === mode) return;
+    gRunRef.current++; stopGameAudio(); setTunerOpen(false); setPlaying(false);
+    setGame({ phase: "idle" }); setGActive(-1); setGFlash(null); targetRef.current = 0;
+    setMode(m);
+  };
+
+  // mede a posição vertical (Y) de cada acorde-alvo dentro da área de rolagem
+  const measureEvents = () => {
+    const el = scrollRef.current; if (!el) return;
+    el.scrollTop = 0;
+    const cTop = el.getBoundingClientRect().top;
+    eventY.current = chartRef.current.map((_, i) => {
+      const node = eventEls.current[i];
+      return node ? node.getBoundingClientRect().top - cTop : 0;
+    });
+  };
+
+  const markResult = (idx, hit) => {
+    setGScore((s) => { const status = s.status.slice(); status[idx] = hit ? "hit" : "miss"; return { ...s, hits: s.hits + (hit ? 1 : 0), status }; });
+    setGFlash({ idx, kind: hit ? "hit" : "miss" });
+    setTimeout(() => setGFlash((f) => (f && f.idx === idx ? null : f)), 350);
+  };
+
+  const finishGame = (myRun) => {
+    if (myRun !== gRunRef.current) return;
+    gRunRef.current++; stopGameAudio(); setGame({ phase: "finished" });
+  };
+
+  // loop principal do jogo: scroll por tempo + detecção de pitch + colisão
+  const runGameFrame = (myRun) => {
+    const el = scrollRef.current, audio = gAudioRef.current, cs = chartRef.current;
+    let lastDetect = 0;
+    const frame = () => {
+      if (myRun !== gRunRef.current) return;
+      const now = performance.now() / 1000;
+      const t = now - gClockRef.current.t0;
+      // --- rolagem sincronizada rigidamente ao cronômetro (segundos) ---
+      if (el && eventY.current.length) {
+        const H = el.clientHeight * 0.38, ys = eventY.current; let y;
+        if (t <= cs[0].t) y = ys[0];
+        else if (t >= cs[cs.length - 1].t) y = ys[ys.length - 1];
+        else {
+          let k = 0; while (k < cs.length - 1 && cs[k + 1].t <= t) k++;
+          const span = (cs[k + 1].t - cs[k].t) || 1;
+          const p = Math.max(0, Math.min(1, (t - cs[k].t) / span));
+          y = ys[k] + (ys[k + 1] - ys[k]) * p;
+        }
+        el.scrollTop = Math.max(0, y - H);
+      }
+      // --- detecção da frequência do microfone (reusa o afinador) ---
+      let pc = null;
+      if (audio && (now - lastDetect) > 0.07) {
+        lastDetect = now;
+        audio.analyser.getFloatTimeDomainData(audio.buf);
+        const freq = autoCorrelate(audio.buf, audio.ctx.sampleRate);
+        if (freq > 0) { const nn = freqToNote(freq); pc = NOTE_TO_I[nn.name]; }
+      }
+      // --- colisão de tempo: acerto / perda do acorde atual ---
+      const ti = targetRef.current;
+      if (ti < cs.length) {
+        const ev = cs[ti];
+        if (t > ev.t + HIT_POST) { markResult(ti, false); targetRef.current = ti + 1; setGActive(targetRef.current); }
+        else if (t >= ev.t - HIT_PRE && pc != null && pc === ev.pc) { markResult(ti, true); targetRef.current = ti + 1; setGActive(targetRef.current); }
+      }
+      if (targetRef.current >= cs.length) { finishGame(myRun); return; }
+      gRafRef.current = requestAnimationFrame(frame);
+    };
+    gRafRef.current = requestAnimationFrame(frame);
+  };
+
+  const startClockAndLoop = (myRun) => {
+    if (myRun !== gRunRef.current) return;
+    gClockRef.current = { t0: performance.now() / 1000 };
+    setGame({ phase: "playing" });
+    runGameFrame(myRun);
+  };
+  const beginCountdown = (myRun) => {
+    let n = 3; setGame({ phase: "countdown", n });
+    const tick = () => {
+      if (myRun !== gRunRef.current) return;
+      n -= 1;
+      if (n <= 0) startClockAndLoop(myRun);
+      else { setGame({ phase: "countdown", n }); setTimeout(tick, 800); }
+    };
+    setTimeout(tick, 800);
+  };
+
+  const startGame = async () => {
+    if (!chart.length) return;
+    gRunRef.current++; const myRun = gRunRef.current;
+    stopGameAudio(); setTunerOpen(false); setPlaying(false);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setGame({ phase: "unsupported" }); return; }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser(); analyser.fftSize = 2048; src.connect(analyser);
+      gAudioRef.current = { ctx, stream, analyser, buf: new Float32Array(analyser.fftSize) };
+    } catch (e) { setGame({ phase: "denied" }); return; }
+    if (myRun !== gRunRef.current) { stopGameAudio(); return; }
+    chartRef.current = chart; targetRef.current = 0;
+    setGScore({ hits: 0, total: chart.length, status: new Array(chart.length).fill(null) });
+    setGActive(0); setGFlash(null);
+    requestAnimationFrame(() => { if (myRun !== gRunRef.current) return; measureEvents(); beginCountdown(myRun); });
+  };
+
+  // limpeza ao desmontar e ao trocar de música (não interfere no Modo Livre)
+  useEffect(() => () => { gRunRef.current++; stopGameAudio(); }, []);
+  useEffect(() => {
+    gRunRef.current++; stopGameAudio();
+    setMode("free"); setGame({ phase: "idle" }); setGActive(-1); setGFlash(null); targetRef.current = 0;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selKey]);
 
   if (!ready) {
     return (
@@ -739,6 +944,10 @@ export default function Palco() {
 
                 {/* barra de ferramentas: transpor / capo / afinador */}
                 <div className="palco-scroll" style={S.toolsBar}>
+                  <div style={S.modeSeg}>
+                    <button className="palco-btn" style={mode === "free" ? S.segActive : S.seg} onClick={() => switchMode("free")}>Livre</button>
+                    <button className="palco-btn" style={mode === "game" ? S.segActive : S.seg} onClick={() => switchMode("game")}>Jogo</button>
+                  </div>
                   <div style={S.toolGroup}>
                     <span style={S.toolLabel}>Tom</span>
                     <button className="palco-btn palco-icon" style={S.toolBtn} onClick={() => changeTranspose(Math.max(-11, transpose - 1))}><Minus size={14} strokeWidth={2.5} /></button>
@@ -752,32 +961,86 @@ export default function Palco() {
                     <button className="palco-btn palco-icon" style={S.toolBtn} onClick={() => changeCapo(Math.min(11, capo + 1))}><Plus size={14} strokeWidth={2.5} /></button>
                   </div>
                   {(transpose !== 0 || capo !== 0) && <button className="palco-btn palco-icon" style={S.toolReset} onClick={resetToneCapo} title="Zerar tom e capo"><RotateCcw size={13} strokeWidth={2.3} /></button>}
-                  <button className="palco-btn palco-ghost" style={S.tunerBtn} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={15} strokeWidth={2.1} /> Afinar</button>
+                  {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerBtn} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={15} strokeWidth={2.1} /> Afinar</button>}
                 </div>
 
-                <div ref={scrollRef} className="palco-scroll" style={S.cifraScroll} onScroll={() => popover && setPopover(null)}>
-                  <div style={{ ...S.cifra, fontSize: effFs, lineHeight: 1.5 }}>
-                    {renderedLines.map((ln) => {
-                      if (ln.kind === "blank") return <div key={ln.key} style={{ height: effFs * 0.7 }} />;
-                      if (ln.kind === "section") return <div key={ln.key} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
-                      if (ln.kind === "chord") return <div key={ln.key} style={{ color: C.amber, fontWeight: 700, letterSpacing: "0.04em", whiteSpace: "pre" }}>{renderChordLine(ln.text, displayShift, onChordTap)}</div>;
-                      return <div key={ln.key} style={{ color: C.text, whiteSpace: "pre" }}>{ln.text || " "}</div>;
-                    })}
-                    <div style={{ height: 140 }} />
-                  </div>
-                </div>
-
-                <div style={S.transportZone}>
-                  <div style={S.transport}>
-                    <button className="palco-btn palco-play" style={{ ...S.playBtn, background: playing ? C.amber : C.surface2, color: playing ? "#1a140a" : C.amber, borderColor: playing ? C.amber : C.border }} onClick={() => setPlaying((p) => !p)} title={playing ? "Pausar" : "Tocar"}>{playing ? <Pause size={22} strokeWidth={2.4} fill="#1a140a" /> : <Play size={22} strokeWidth={2.2} fill={C.amber} style={{ marginLeft: 2 }} />}</button>
-                    <div style={S.speedBlock}>
-                      <div style={S.speedTop}><span style={S.speedLabel}>Velocidade</span><span style={S.speedVal}>{speed}</span></div>
-                      <input className="palco-range" type="range" min={1} max={10} step={1} value={speed} onChange={(e) => changeSpeed(Number(e.target.value))} style={{ width: "100%" }} />
-                      <div style={S.speedScale}><span>Lento</span><span>Rápido</span></div>
+                <div style={S.cifraWrap}>
+                  <div ref={scrollRef} className="palco-scroll" style={S.cifraScroll} onScroll={() => popover && setPopover(null)}>
+                    <div style={{ ...S.cifra, fontSize: effFs, lineHeight: 1.5 }}>
+                      {mode === "game"
+                        ? (() => {
+                            const ctr = { n: 0, pending: false };
+                            return renderedLines.map((ln) => {
+                              if (ln.kind === "blank") return <div key={ln.key} style={{ height: effFs * 0.7 }} />;
+                              if (ln.kind === "section") return <div key={ln.key} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
+                              if (ln.kind === "chord") return <div key={ln.key} style={{ whiteSpace: "pre", letterSpacing: "0.04em" }}>{renderGameChordLine(ln.raw, displayShift, ctr, gScore.status, gActive, eventEls, onChordTap)}</div>;
+                              return <div key={ln.key} style={{ color: C.text, whiteSpace: "pre" }}>{ln.text || " "}</div>;
+                            });
+                          })()
+                        : renderedLines.map((ln) => {
+                            if (ln.kind === "blank") return <div key={ln.key} style={{ height: effFs * 0.7 }} />;
+                            if (ln.kind === "section") return <div key={ln.key} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
+                            if (ln.kind === "chord") return <div key={ln.key} style={{ color: C.amber, fontWeight: 700, letterSpacing: "0.04em", whiteSpace: "pre" }}>{renderChordLine(ln.text, displayShift, onChordTap)}</div>;
+                            return <div key={ln.key} style={{ color: C.text, whiteSpace: "pre" }}>{ln.text || " "}</div>;
+                          })}
+                      <div style={{ height: mode === "game" ? 260 : 140 }} />
                     </div>
-                    <button className="palco-btn palco-icon" style={S.resetBtn} onClick={resetScroll} title="Voltar ao início"><RotateCcw size={18} strokeWidth={2.2} /></button>
                   </div>
+                  {mode === "game" && game.phase === "playing" && <div style={S.hitLine} />}
                 </div>
+
+                {mode === "free" ? (
+                  <div style={S.transportZone}>
+                    <div style={S.transport}>
+                      <button className="palco-btn palco-play" style={{ ...S.playBtn, background: playing ? C.amber : C.surface2, color: playing ? "#1a140a" : C.amber, borderColor: playing ? C.amber : C.border }} onClick={() => setPlaying((p) => !p)} title={playing ? "Pausar" : "Tocar"}>{playing ? <Pause size={22} strokeWidth={2.4} fill="#1a140a" /> : <Play size={22} strokeWidth={2.2} fill={C.amber} style={{ marginLeft: 2 }} />}</button>
+                      <div style={S.speedBlock}>
+                        <div style={S.speedTop}><span style={S.speedLabel}>Velocidade</span><span style={S.speedVal}>{speed}</span></div>
+                        <input className="palco-range" type="range" min={1} max={10} step={1} value={speed} onChange={(e) => changeSpeed(Number(e.target.value))} style={{ width: "100%" }} />
+                        <div style={S.speedScale}><span>Lento</span><span>Rápido</span></div>
+                      </div>
+                      <button className="palco-btn palco-icon" style={S.resetBtn} onClick={resetScroll} title="Voltar ao início"><RotateCcw size={18} strokeWidth={2.2} /></button>
+                    </div>
+                  </div>
+                ) : (
+                  <div style={S.transportZone}>
+                    <div style={S.gamePanel}>
+                      {(() => {
+                        const resolved = gScore.status.filter(Boolean).length;
+                        const bigIdx = gFlash ? gFlash.idx : gActive;
+                        const bigChord = (chart[bigIdx] && chart[bigIdx].chord) || "—";
+                        const bigColor = gFlash ? (gFlash.kind === "hit" ? C.green : C.red) : C.amber;
+                        if (!hasChart) return (
+                          <div style={S.gameInfo}>
+                            <strong style={{ color: C.text }}>O Modo Jogo precisa de marcações de tempo.</strong>
+                            <span>Adicione <code style={S.code}>[mm:ss]</code> antes dos acordes na cifra — ex.: <code style={S.code}>[00:12] Em</code>. Cada acorde marcado vira um alvo no ritmo. Importe o exemplo <em>"Treino de Ritmo"</em> para testar.</span>
+                          </div>
+                        );
+                        if (game.phase === "unsupported") return (<div style={S.gameInfo}><span>Seu navegador não dá acesso ao microfone aqui (comum em arquivo local). Use o app publicado em <strong>https</strong> para jogar.</span></div>);
+                        if (game.phase === "denied") return (<div style={S.gameRow}><span style={{ ...S.gameHint, flex: 1 }}>Microfone bloqueado. Autorize o acesso e tente de novo.</span><button className="palco-btn palco-primary" style={S.btnPrimary} onClick={startGame}>Tentar de novo</button></div>);
+                        if (game.phase === "countdown") return (<div style={S.gameCountWrap}><div style={S.gameCount}>{game.n}</div><span style={S.gameHint}>Prepare o violão…</span></div>);
+                        if (game.phase === "playing") return (
+                          <div style={S.gameRow}>
+                            <div style={{ ...S.gameBig, color: bigColor }}>{bigChord}</div>
+                            <div style={S.gameStats}>
+                              <div style={S.gameStatLine}><span style={{ color: C.green }}>● {gScore.hits}</span><span style={{ color: C.red }}>● {resolved - gScore.hits}</span></div>
+                              <div style={S.gameHint}>{resolved}/{gScore.total} acordes</div>
+                            </div>
+                            <button className="palco-btn palco-icon" style={S.resetBtn} onClick={stopGame} title="Parar jogo"><X size={18} strokeWidth={2.2} /></button>
+                          </div>
+                        );
+                        return (
+                          <div style={S.gameRow}>
+                            <button className="palco-btn palco-play" style={{ ...S.playBtn, background: C.surface2, color: C.amber, borderColor: C.border }} onClick={startGame} title="Iniciar jogo"><Play size={22} strokeWidth={2.2} fill={C.amber} style={{ marginLeft: 2 }} /></button>
+                            <div style={S.gameStats}>
+                              <div style={{ ...S.gameStatLine, color: C.text, fontWeight: 600, fontSize: 15 }}>Iniciar jogo</div>
+                              <div style={S.gameHint}>{chart.length} acordes no ritmo · precisa de microfone</div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  </div>
+                )}
               </>
             )}
           </main>
@@ -786,6 +1049,27 @@ export default function Palco() {
 
       {popover && <ChordPopover data={popover} onClose={() => setPopover(null)} />}
       {tunerOpen && <Tuner onClose={() => setTunerOpen(false)} />}
+      {game.phase === "finished" && (() => {
+        const pct = gScore.total ? Math.round((gScore.hits / gScore.total) * 100) : 0;
+        const g = gradeFor(pct);
+        return (
+          <div style={S.tunerOverlay} onClick={stopGame}>
+            <div style={S.scoreCard} onClick={(e) => e.stopPropagation()}>
+              <div style={S.tunerHead}><div style={{ display: "flex", alignItems: "center", gap: 9 }}><Music2 size={18} color={C.amber} strokeWidth={2.2} /><span style={S.tunerTitle}>Resultado</span></div><button className="palco-btn palco-icon" style={S.popClose} onClick={stopGame}><X size={16} strokeWidth={2.3} /></button></div>
+              <div style={S.scoreBody}>
+                <div style={{ ...S.scoreGrade, color: g.color }}>{g.letter}</div>
+                <div style={{ ...S.scorePct, color: C.text }}>{pct}%</div>
+                <div style={{ ...S.scoreLabel, color: g.color }}>Nota {g.letter} — {g.label}</div>
+                <div style={S.scoreSub}>Você acertou {gScore.hits} de {gScore.total} acordes no tempo certo</div>
+                <div style={S.scoreActions}>
+                  <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={startGame}><Play size={17} strokeWidth={2.2} fill="#1a140a" /> Jogar de novo</button>
+                  <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={stopGame}>Sair</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -810,6 +1094,43 @@ function renderChordLine(text, shift, onChordTap) {
       if ((i + 1 >= parts.length || parts[i + 1].g === undefined) && diff > 0) nodes.push(<span key={i + "p"}>{" ".repeat(diff)}</span>);
     } else if (isChord) {
       nodes.push(<span key={i} className="palco-chord" onClick={(e) => onChordTap(tok, e)}>{tok}</span>);
+    } else {
+      nodes.push(<span key={i}>{tok}</span>);
+    }
+  }
+  return nodes;
+}
+
+/* ----- render de linha de acordes no Modo Jogo (com alvos) -------- */
+function renderGameChordLine(text, shift, ctr, statusArr, activeIdx, elsRef, onChordTap) {
+  const parts = []; const re = /(\s+)|(\S+)/g; let m;
+  while ((m = re.exec(text))) parts.push(m[1] !== undefined ? { g: m[1] } : { t: m[2] });
+  const nodes = [];
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p.g !== undefined) { nodes.push(<span key={i}>{p.g}</span>); continue; }
+    const tok = p.t;
+    if (TIME_TOKEN_RE.test(tok)) {                 // marcador [mm:ss]: não exibe
+      if (i + 1 < parts.length && parts[i + 1].g !== undefined) parts[i + 1] = { g: "" };
+      ctr.pending = true;
+      continue;
+    }
+    const isChord = CHORD_RE.test(tok);
+    if (ctr.pending) {
+      ctr.pending = false;
+      if (isChord) {                                // este acorde é um alvo do jogo
+        const evIdx = ctr.n++;
+        const disp = transposeToken(tok, shift);
+        const st = statusArr[evIdx];
+        const color = st === "hit" ? C.green : st === "miss" ? C.red : evIdx === activeIdx ? C.amber : C.amberDeep;
+        const cls = "palco-chord palco-ev" + (evIdx === activeIdx ? " palco-ev-active" : "") + (st === "hit" ? " palco-ev-hit" : st === "miss" ? " palco-ev-miss" : "");
+        nodes.push(<span key={i} ref={(el) => { elsRef.current[evIdx] = el; }} className={cls} style={{ color, fontWeight: 700 }} onClick={(e) => onChordTap(disp, e)}>{disp}</span>);
+        continue;
+      }
+    }
+    if (isChord) {
+      const disp = transposeToken(tok, shift);
+      nodes.push(<span key={i} className="palco-chord" style={{ color: C.amber, fontWeight: 700 }} onClick={(e) => onChordTap(disp, e)}>{disp}</span>);
     } else {
       nodes.push(<span key={i}>{tok}</span>);
     }
@@ -1066,4 +1387,26 @@ const S = {
   tunerCenter: { position: "absolute", left: "50%", top: -3, width: 2, height: 16, background: C.textFaint, transform: "translateX(-50%)" },
   tunerNeedle: { position: "absolute", top: -2, width: 6, height: 14, borderRadius: 3, transform: "translateX(-50%)", transition: "left .08s linear, background .1s" },
   tunerScale: { display: "flex", justifyContent: "space-between", width: "100%", fontSize: 12, color: C.textFaint },
+  // ----- Modo Jogo -----
+  modeSeg: { display: "flex", background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: 3, gap: 3, flexShrink: 0 },
+  seg: { border: "none", background: "transparent", color: C.textDim, fontFamily: FONT_UI, fontWeight: 600, fontSize: 12.5, padding: "6px 12px", borderRadius: 8, cursor: "pointer" },
+  segActive: { border: "none", background: C.amber, color: "#1a140a", fontFamily: FONT_UI, fontWeight: 700, fontSize: 12.5, padding: "6px 12px", borderRadius: 8, cursor: "pointer" },
+  cifraWrap: { position: "relative", flex: 1, minHeight: 0, display: "flex" },
+  hitLine: { position: "absolute", left: 0, right: 0, top: "38%", borderTop: `2px dashed ${C.amber}`, opacity: 0.45, pointerEvents: "none" },
+  gamePanel: { maxWidth: 720, margin: "0 auto", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 18, padding: "12px 16px", boxShadow: "0 12px 40px rgba(0,0,0,.45)" },
+  gameInfo: { display: "flex", flexDirection: "column", gap: 6, fontSize: 13, color: C.textDim, lineHeight: 1.5 },
+  gameRow: { display: "flex", alignItems: "center", gap: 16 },
+  gameHint: { fontSize: 12, color: C.textFaint },
+  gameBig: { fontFamily: FONT_MONO, fontWeight: 700, fontSize: 34, minWidth: 70, textAlign: "center", transition: "color .12s" },
+  gameStats: { flex: 1, minWidth: 0 },
+  gameStatLine: { display: "flex", gap: 14, fontFamily: FONT_MONO, fontSize: 15, fontWeight: 600 },
+  gameCountWrap: { display: "flex", flexDirection: "column", alignItems: "center", gap: 2 },
+  gameCount: { fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 44, color: C.amber, lineHeight: 1 },
+  scoreCard: { width: "100%", maxWidth: 380, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, padding: 20, boxShadow: "0 24px 70px rgba(0,0,0,.6)" },
+  scoreBody: { display: "flex", flexDirection: "column", alignItems: "center", gap: 6, padding: "14px 6px 6px", textAlign: "center" },
+  scoreGrade: { fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 72, lineHeight: 1 },
+  scorePct: { fontFamily: FONT_MONO, fontWeight: 700, fontSize: 30 },
+  scoreLabel: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17 },
+  scoreSub: { fontSize: 13, color: C.textFaint, marginTop: 2, maxWidth: 300, lineHeight: 1.5 },
+  scoreActions: { display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", justifyContent: "center" },
 };
