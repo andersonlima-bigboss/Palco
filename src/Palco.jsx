@@ -4,7 +4,7 @@ import {
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
   Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
   Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Image as ImageIcon,
-  RotateCw, GripVertical,
+  RotateCw, GripVertical, Eye, EyeOff,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -18,6 +18,7 @@ const C = {
   textFaint: "#8C8068", amber: "#F0A833", amberDeep: "#c4861f", teal: "#79B7A6",
   red: "#E0683C", green: "#7BC47F",
 };
+const NEON_GREEN = "#39F06E";          // diagramas de acorde (verde neon)
 const FONT_UI = "'Inter', system-ui, -apple-system, sans-serif";
 const FONT_DISPLAY = "'Space Grotesk', 'Inter', system-ui, sans-serif";
 const FONT_MONO = "'JetBrains Mono', 'Courier New', ui-monospace, monospace";
@@ -69,6 +70,7 @@ function parseSongs(raw) {
   const tuningCount = (text.match(/^\s*tuning\s*:\s*eb/gim) || []).length;
   let songs;
   if (tuningCount >= 2) songs = parseUltimateGuitar(text);
+  else if (isCifraClub(text)) songs = parseSimple(cleanCifraClubText(text));   // página do CifraClub
   else {
     const ugt = ugTitle(text);                 // página única do UG: usa nome + limpeza dedicada
     songs = ugt ? [{ title: ugt, body: cleanUGSong(text) }] : parseSimple(text);
@@ -107,6 +109,51 @@ function ugClean(text) {
 // Limpeza de UMA música colada do Ultimate-Guitar (cabeçalho + rodapé + lixo).
 const UG_FOOTER_RE = /^(last update\b|please,?\s*rate this tab|rating$|[\d.,]+\s*rates?$|welcome offer|play next$|more versions$|related tabs$|from collections$|theory and practice$|get effects$|all artists$|all collections$|©|all rights reserved|official version created)/i;
 function isTabLine(l) { return /^\s*[a-gA-G][b#]?\s*\|/.test(l) || /\|[-0-9hpb/\\~xX().\s]{4,}\|/.test(l); }
+// linha de tablatura (E|---) ou de palhetada (setas) — para poder ocultar os solos
+function isTabOrStrum(text) {
+  const t = (text || "").trim();
+  if (!t) return false;
+  if (/^[a-gA-G][b#]?\s*[|├]/.test(t)) return true;
+  if (/^[\s↓↑⤓⤒]+$/.test(text) && /[↓↑]/.test(text)) return true;
+  return false;
+}
+// modo "só letra": mantém letra + acordes cantados + seções com letra; esconde tabs,
+// os acordes que rotulam solos e as seções/labels que só têm tablatura.
+function filterPerformance(lines) {
+  const keep = new Array(lines.length).fill(false);
+  for (let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    if (ln.tab) continue;                                    // tabs/[Tab]/palhetada
+    if (ln.kind === "lyric") { keep[i] = true; continue; }
+    if (ln.kind === "chord") {                               // acorde: mantém só se vier letra antes de um tab/seção
+      for (let j = i + 1; j < lines.length; j++) {
+        const n = lines[j];
+        if (n.kind === "blank") continue;
+        if (n.tab || n.kind === "section") break;
+        if (n.kind === "chord") continue;
+        if (n.kind === "lyric") { keep[i] = true; break; }
+      }
+      continue;
+    }
+    if (ln.kind === "section") {                             // seção: mantém só se contiver letra
+      let hasLyric = false;
+      for (let j = i + 1; j < lines.length; j++) {
+        const n = lines[j];
+        if (n.kind === "section") break;
+        if (!n.tab && n.kind === "lyric") { hasLyric = true; break; }
+      }
+      keep[i] = hasLyric;
+    }
+  }
+  const out = [];
+  let lastBlank = true;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].kind === "blank") { if (!lastBlank) { out.push(lines[i]); lastBlank = true; } continue; }
+    if (keep[i]) { out.push(lines[i]); lastBlank = false; }
+  }
+  while (out.length && out[out.length - 1].kind === "blank") out.pop();
+  return out;
+}
 // Extrai o nome da música do cabeçalho do UG (ex.: "Brother Chords by Alice In Chains" -> "Brother").
 function ugTitle(raw) {
   const lines = (raw || "").replace(/\r\n/g, "\n").split("\n");
@@ -135,6 +182,89 @@ function cleanUGSong(raw) {
   const out = [...header, ...(header.length ? [""] : []), ...lines];
   return out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n+$/, "");
 }
+/* ------------------- import de PDF do CifraClub ------------------- */
+const PDF_LIB = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+const PDF_WORKER = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+function loadPdfJs() {
+  return new Promise((resolve, reject) => {
+    if (window.pdfjsLib) { try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER; } catch (e) {} return resolve(window.pdfjsLib); }
+    const s = document.createElement("script");
+    s.src = PDF_LIB;
+    s.onload = () => { try { window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER; resolve(window.pdfjsLib); } catch (e) { reject(e); } };
+    s.onerror = () => reject(new Error("pdfjs load failed"));
+    document.head.appendChild(s);
+  });
+}
+// extrai o texto do PDF preservando o alinhamento (acordes sobre a letra) via posições x/y
+async function extractPdfText(file) {
+  const pdfjs = await loadPdfJs();
+  const buf = await file.arrayBuffer();
+  const doc = await pdfjs.getDocument({ data: buf }).promise;
+  const out = [];
+  for (let p = 1; p <= doc.numPages; p++) {
+    const page = await doc.getPage(p);
+    const tc = await page.getTextContent();
+    const items = (tc.items || []).filter((it) => it.str != null && it.str !== "");
+    let totW = 0, totC = 0, minX = Infinity;
+    for (const it of items) { if (it.width && it.str.length) { totW += it.width; totC += it.str.length; } minX = Math.min(minX, it.transform[4]); }
+    const charW = totC ? Math.max(3, totW / totC) : 5;
+    const lines = {};
+    for (const it of items) { const y = Math.round(it.transform[5]); (lines[y] = lines[y] || []).push({ x: it.transform[4], str: it.str }); }
+    for (const y of Object.keys(lines).map(Number).sort((a, b) => b - a)) {
+      const row = lines[y].sort((a, b) => a.x - b.x);
+      let s = "";
+      for (const it of row) { const col = Math.max(s.length, Math.round((it.x - minX) / charW)); s = s.padEnd(col, " ") + it.str; }
+      out.push(s.replace(/\s+$/, ""));
+    }
+    out.push("");
+  }
+  return out.join("\n");
+}
+// limpa uma cifra do CifraClub: mantém Título + Tom + Afinação e o corpo (seções/acordes/letra);
+// remove a prévia (Verses/Chorus...) e os diagramas de acorde do fim.
+function cleanCifraClub(raw) {
+  const lines = (raw || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const nonEmpty = lines.map((l) => l.trim()).filter(Boolean);
+  const title = nonEmpty[0] || "Música";
+  const tom = lines.find((l) => /^\s*tom\s*:/i.test(l));
+  const afin = lines.find((l) => /^\s*afina[cç][aã]o\s*:/i.test(l));
+  const cifraStart = lines.findIndex((l) => /^\s*\[.+\]\s*$/.test(l));
+  let body = cifraStart !== -1 ? lines.slice(cifraStart) : lines;
+  // corta os diagramas de acorde do fim (1ª linha só de números/casas de dedilhado em diante)
+  let di = -1;
+  for (let i = 0; i < body.length; i++) { const t = body[i].trim(); if (t && /^[\dªº\s]+$/.test(t) && /\d/.test(t) && !isChordLine(t)) { di = i; break; } }
+  if (di !== -1) { let cut = di; for (let k = di - 1; k >= 0; k--) { const t = body[k].trim(); if (t === "" || isChordLine(t)) cut = k; else break; } body = body.slice(0, cut); }
+  const bodyStr = body.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n+$/, "");
+  const head = [`Título: ${title}`];
+  if (tom) head.push(tom.trim());
+  if (afin) head.push(afin.trim());
+  return head.join("\n") + "\n\n" + bodyStr;
+}
+// detecta se um texto colado é de uma página do CifraClub
+function isCifraClub(text) {
+  const head = (text || "").slice(0, 500).toLowerCase();
+  return /cifra\s*club|p[áa]gina inicial\s*►|cifra:\s*principal/.test(head) || (/\[tab\b/i.test(text || "") && /^\s*tom\s*:/im.test(text || ""));
+}
+// limpa o TEXTO colado de uma página do CifraClub (nav + cabeçalho + rodapé/comentários/dicionário)
+function cleanCifraClubText(raw) {
+  const lines = (raw || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  let title = "Música";
+  const bc = lines.find((l) => /p[áa]gina inicial/i.test(l) && l.includes("►"));
+  if (bc) { const segs = bc.split("►").map((s) => s.trim()).filter(Boolean); if (segs.length) title = segs[segs.length - 1]; }
+  const tom = lines.find((l) => /^\s*tom\s*:/i.test(l));
+  const afin = lines.find((l) => /^\s*afina[cç][aã]o\s*:/i.test(l));
+  const cifraStart = lines.findIndex((l) => /^\s*\[.+\]/.test(l));
+  let body = cifraStart !== -1 ? lines.slice(cifraStart) : lines;
+  const footRe = /^(composi[çc][aã]o de |colabora[çc][aã]o e revis|conseguiu tocar|auto rolagem|[\d.,]+\s*exibi|ver todos os coment|adicione um coment|mais acessadas)/i;
+  const fi = body.findIndex((l) => { const t = l.trim(); return footRe.test(t) || /esta informa[çc][aã]o est[áa] errada/i.test(t); });
+  if (fi !== -1) body = body.slice(0, fi);
+  const bodyStr = body.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n+$/, "");
+  const head = [`Título: ${title}`];
+  if (tom) head.push(tom.trim());
+  if (afin) head.push(afin.trim());
+  return head.join("\n") + "\n\n" + bodyStr;
+}
+
 function ugDetectTitle(lines, tuningIdx) {
   let j = tuningIdx - 1;
   while (j >= 0 && lines[j].trim() === "") j--;
@@ -494,12 +624,13 @@ export default function Palco() {
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
   const [fontSize, setFontSize] = useState(18);
   const [autoFit, setAutoFit] = useState(true);
+  const [hideTabs, setHideTabs] = useState(false);                 // ocultar solos/tablaturas (só letra + acordes)
   const [containerW, setContainerW] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
 
   const [transpose, setTranspose] = useState(0);
   const [capo, setCapo] = useState(0);
-  const [popover, setPopover] = useState(null); // {name, left, top, place}
+  const [popovers, setPopovers] = useState([]); // [{ id, name, x, y }] — vários, arrastáveis e fixos
   const [tunerOpen, setTunerOpen] = useState(false);
 
   // ----- Modo Karaokê (a cifra segue o tempo do áudio) -----
@@ -519,6 +650,8 @@ export default function Palco() {
   const [coverFor, setCoverFor] = useState(null);                  // id do álbum cuja capa está sendo editada
   const [coverUrl, setCoverUrl] = useState("");
   const coverFileRef = useRef(null);
+  const [pdfBusy, setPdfBusy] = useState(false);                   // lendo PDF do CifraClub
+  const pdfInputRef = useRef(null);
   const [confirmAlbumDel, setConfirmAlbumDel] = useState(null);    // { id, name, count } do álbum a apagar | null
   const [openSetId, setOpenSetId] = useState(null);                // setlist aberto (view "setlist")
   const [editSet, setEditSet] = useState(null);                    // { id, name, parts:[refs[],refs[]] } em edição
@@ -640,7 +773,7 @@ export default function Palco() {
     setTranspose(st.transpose || 0);
     setCapo(st.capo || 0);
     setSpeed(snapSpeed(st.speed));
-    setPlaying(false); accRef.current = 0; setPopover(null);
+    setPlaying(false); accRef.current = 0; setPopovers([]);
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selKey]);
@@ -665,7 +798,8 @@ export default function Palco() {
     return selectedSong.body.split("\n").map((line, i) => {
       const raw = normalizeTimes(line);   // mantém [mm:ss] (usado pelo Modo Jogo)
       const text = stripTimes(raw);        // versão limpa (exibição)
-      return { key: i, raw, text, kind: classifyLine(text) };
+      const tab = isTabOrStrum(text) || /^\s*\[tab\b/i.test(text) || /^\s*parte\s+\d+\s+de\s+\d+\s*$/i.test(text);
+      return { key: i, raw, text, kind: classifyLine(text), tab };
     });
   }, [selectedSong]);
 
@@ -720,10 +854,10 @@ export default function Palco() {
   const openAlbum = (id) => { setCurrentAlbumId(id); setSelected(isMobileNow() ? null : 0); setView("album"); resetSongState(); };
   const openSong = (idx) => { setSelected(idx); resetSongState(); };
   const openSongRef = (albumId, idx) => { setCurrentAlbumId(albumId); setView("album"); setQuery(""); setTimeout(() => setSelected(idx), 0); resetSongState(); };
-  const resetSongState = () => { setPlaying(false); accRef.current = 0; setPopover(null); if (scrollRef.current) scrollRef.current.scrollTop = 0; };
-  const backToSongs = () => { setPlaying(false); setSelected(null); setPopover(null); };
+  const resetSongState = () => { setPlaying(false); accRef.current = 0; setPopovers([]); if (scrollRef.current) scrollRef.current.scrollTop = 0; };
+  const backToSongs = () => { setPlaying(false); setSelected(null); setPopovers([]); };
   const backToAlbums = () => {
-    setPlaying(false); setSelected(null); setPopover(null);
+    setPlaying(false); setSelected(null); setPopovers([]);
     if (isSetlistCtx) { setOpenSetId(currentAlbumId.slice(4)); setCurrentAlbumId(null); setView("setlist"); }
     else { setCurrentAlbumId(null); setView("albums"); }
   };
@@ -741,6 +875,20 @@ export default function Palco() {
 
   /* importação */
   const goImport = () => { setView("import"); setPreview(null); setImportErr(""); setLibMsg(""); };
+  const onPdfFile = async (e) => {
+    const file = e.target.files && e.target.files[0]; if (!file) return;
+    setPdfBusy(true); setImportErr(""); setPreview(null);
+    try {
+      const text = await extractPdfText(file);
+      const cleaned = cleanCifraClub(text);
+      if (!cleaned.replace(/^Título:.*$/m, "").trim()) throw new Error("vazio");
+      setRaw(cleaned);
+    } catch (err) {
+      setImportErr("Não consegui ler o PDF (o leitor precisa de internet, ou o arquivo é uma imagem). Tente colar o texto.");
+    }
+    setPdfBusy(false);
+    if (pdfInputRef.current) pdfInputRef.current.value = "";
+  };
   const processImport = () => {
     const parsed = parseSongs(raw);
     if (!parsed.length) { setImportErr("Não encontrei nenhuma música. Confira se cada bloco começa com 'Título:' ou tem 'Tuning:' (Ultimate Guitar)."); setPreview(null); return; }
@@ -810,13 +958,17 @@ export default function Palco() {
     reader.readAsText(file);
   };
 
-  /* clique no acorde -> popover de diagrama */
+  /* clique no acorde -> abre mais um diagrama (vários ao mesmo tempo) */
   const onChordTap = (name, e) => {
     e.stopPropagation();
     const r = e.currentTarget.getBoundingClientRect();
-    const place = r.top < 230 ? "below" : "above";
-    setPopover({ name, left: Math.max(10, Math.min(window.innerWidth - 174, r.left + r.width / 2 - 82)), top: place === "above" ? r.top : r.bottom, place });
+    const x = Math.max(8, Math.min(window.innerWidth - 130, r.left + r.width / 2 - 59));
+    const y = Math.max(56, Math.min(window.innerHeight - 190, r.bottom + 6));
+    const id = "pop_" + Date.now() + "_" + Math.round(Math.random() * 1e6);
+    setPopovers((p) => [...p, { id, name, x, y }]);
   };
+  const closePopover = (id) => setPopovers((p) => p.filter((q) => q.id !== id));
+  const movePopover = (id, x, y) => setPopovers((p) => p.map((q) => (q.id === id ? { ...q, x, y } : q)));
 
   /* busca */
   const results = useMemo(() => {
@@ -1029,13 +1181,13 @@ export default function Palco() {
     if (!selectedSong || !songImportRaw.trim()) return;
     const raw = songImportRaw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
     const multi = (raw.match(/^\s*tuning\s*:\s*eb/gim) || []).length >= 2;
-    let body;
+    let body, t = null;
     if (multi) body = parseSongs(raw).map((p) => p.body).filter(Boolean).join("\n\n");
-    else body = cleanUGSong(raw);
-    if (!body.trim()) body = raw.trim();
+    else if (isCifraClub(raw)) { const p = parseSimple(cleanCifraClubText(raw))[0]; body = p ? p.body : ""; t = p ? p.title : null; }
+    else { body = cleanUGSong(raw); t = ugTitle(raw); }
+    if (!body || !body.trim()) body = raw.trim();
     const patch = { body };
-    const t = ugTitle(raw);                    // auto-renomeia com o nome real da música (se detectado)
-    if (t) patch.title = t;
+    if (t) patch.title = t;                     // auto-renomeia com o nome real da música
     patchSong(selectedSong.albumId, selectedSong.idx, patch);
     setSongImportRaw("");
   };
@@ -1506,9 +1658,14 @@ export default function Palco() {
         <div className="palco-scroll" style={S.importWrap}>
           <button className="palco-btn palco-icon" style={S.importBack} onClick={() => (library.albums.length ? backToAlbums() : null)}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Álbuns</span></button>
           <h1 style={S.importTitle}>Importar álbum</h1>
-          <p style={S.tagline}>Cole as cifras de um álbum inteiro. Reconheço o formato manual (<code style={S.code}>Título:</code> / <code style={S.code}>---</code>) e o texto bruto do Ultimate Guitar.</p>
+          <p style={S.tagline}>Cole as cifras de um álbum inteiro, ou o texto bruto do <strong>Ultimate Guitar</strong> / <strong>CifraClub</strong>, ou suba um <strong>PDF do CifraClub</strong>. Reconheço também o formato manual (<code style={S.code}>Título:</code> / <code style={S.code}>---</code>).</p>
           {!preview ? (
             <>
+              <input ref={pdfInputRef} type="file" accept="application/pdf,.pdf" onChange={onPdfFile} style={{ display: "none" }} />
+              <div style={S.importPdfRow}>
+                <button className="palco-btn palco-ghost neon" style={{ ...S.btnGhost, opacity: pdfBusy ? 0.6 : 1 }} onClick={() => pdfInputRef.current && pdfInputRef.current.click()} disabled={pdfBusy}><Upload size={17} strokeWidth={2} /> {pdfBusy ? "Lendo PDF…" : "Subir PDF (CifraClub)"}</button>
+                <span style={S.importPdfHint}>ou cole o texto abaixo</span>
+              </div>
               <textarea className="palco-textarea" value={raw} onChange={(e) => setRaw(e.target.value)} placeholder={"Cole o álbum aqui…\n\nTítulo: Minha música\n[Intro] C  G  Am  F\n\nC           G\nLetra..."} style={S.textarea} spellCheck={false} />
               {importErr && <div style={S.errorBox}>{importErr}</div>}
               <div style={S.importActions}>
@@ -1604,8 +1761,8 @@ export default function Palco() {
                   <button className="palco-btn palco-icon" style={S.headStar} onClick={() => setRename({ kind: "song", albumId: selectedSong.albumId, idx: selectedSong.idx, value: selectedSong.title })} title="Renomear música"><Pencil size={16} strokeWidth={2.1} /></button>
                   <button className="palco-btn palco-star" style={{ ...S.headStar, color: isFav ? C.amber : C.textDim }} onClick={() => toggleFav(selectedSong.albumId, selectedSong.idx)} title={isFav ? "Remover dos favoritos" : "Favoritar"}><Star size={18} fill={isFav ? C.amber : "none"} strokeWidth={2} /></button>
                   <div style={S.headControls}>
-                    <button className="palco-btn" style={{ ...S.autoBtn, background: autoFit ? C.amber : C.surface, color: autoFit ? "#1a140a" : C.textDim, borderColor: autoFit ? C.amber : C.borderSoft }} onClick={() => setAutoFit((v) => !v)} title="Ajustar fonte à largura"><Maximize2 size={14} strokeWidth={2.4} /><span style={{ marginLeft: 6, fontWeight: 600, fontSize: 12.5 }}>Ajustar</span></button>
-                    {!autoFit && (<div style={S.fontControls}><button className="palco-btn palco-icon" style={S.fontBtn} onClick={() => setFontSize((f) => Math.max(11, f - 1))}><Minus size={15} strokeWidth={2.4} /></button><span style={S.fontVal}>{fontSize}</span><button className="palco-btn palco-icon" style={S.fontBtn} onClick={() => setFontSize((f) => Math.min(40, f + 1))}><Plus size={15} strokeWidth={2.4} /></button></div>)}
+                    <button className="palco-btn" style={{ ...S.autoBtn, background: autoFit ? C.amber : C.surface, color: autoFit ? "#1a140a" : C.textDim, borderColor: autoFit ? C.amber : C.borderSoft }} onClick={() => setAutoFit((v) => !v)} title={autoFit ? "Ajuste automático de fonte (ativo)" : "Ajustar fonte à largura"}><Maximize2 size={15} strokeWidth={2.4} /></button>
+                    {!autoFit && (<div style={S.fontControls}><button className="palco-btn palco-icon" style={S.fontBtn} onClick={() => setFontSize((f) => Math.max(11, f - 1))}><Minus size={14} strokeWidth={2.4} /></button><span style={S.fontVal}>{fontSize}</span><button className="palco-btn palco-icon" style={S.fontBtn} onClick={() => setFontSize((f) => Math.min(40, f + 1))}><Plus size={14} strokeWidth={2.4} /></button></div>)}
                   </div>
                 </header>
 
@@ -1625,6 +1782,7 @@ export default function Palco() {
                     <button className="palco-btn" style={mode === "karaoke" ? S.segActive : S.seg} onClick={() => switchMode("karaoke")}>Karaokê</button>
                     <button className="palco-btn" style={mode === "gighero" ? S.segActive : S.seg} onClick={() => switchMode("gighero")}>GigHero</button>
                   </div>
+                  {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerIcon} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={16} strokeWidth={2.1} /></button>}
                   <div style={S.toolGroup}>
                     <span style={S.toolLabel}>Tom</span>
                     <button className="palco-btn palco-icon" style={S.toolBtn} onClick={() => changeTranspose(Math.max(-11, transpose - 1))}><Minus size={14} strokeWidth={2.5} /></button>
@@ -1638,8 +1796,8 @@ export default function Palco() {
                     <button className="palco-btn palco-icon" style={S.toolBtn} onClick={() => changeCapo(Math.min(11, capo + 1))}><Plus size={14} strokeWidth={2.5} /></button>
                   </div>
                   {(transpose !== 0 || capo !== 0) && <button className="palco-btn palco-icon" style={S.toolReset} onClick={resetToneCapo} title="Zerar tom e capo"><RotateCcw size={13} strokeWidth={2.3} /></button>}
-                  {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerBtn} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={15} strokeWidth={2.1} /> Afinar</button>}
-                  {selectedSong.link && <a href={selectedSong.link} target="_blank" rel="noreferrer" style={{ ...S.ugTool, marginLeft: mode === "free" ? 0 : "auto" }} title="Abrir cifra no Ultimate-Guitar"><FileText size={14} strokeWidth={2.1} /></a>}
+                  <button className="palco-btn palco-ghost" style={{ ...(hideTabs ? S.tabToggleOn : S.tabToggle), marginLeft: "auto" }} onClick={() => setHideTabs((v) => !v)} title={hideTabs ? "Mostrar solos e tablaturas" : "Ocultar solos/tablaturas (só letra e acordes)"}>{hideTabs ? <Eye size={15} strokeWidth={2.1} /> : <EyeOff size={15} strokeWidth={2.1} />} Solos</button>
+                  {selectedSong.link && <a href={selectedSong.link} target="_blank" rel="noreferrer" style={S.ugTool} title="Abrir cifra no Ultimate-Guitar"><FileText size={14} strokeWidth={2.1} /></a>}
                 </div>
 
                 {capo > 0 && (
@@ -1649,14 +1807,15 @@ export default function Palco() {
                 )}
 
                 <div style={S.cifraWrap}>
-                  <div ref={scrollRef} className="palco-scroll" style={S.cifraScroll} onScroll={() => popover && setPopover(null)}>
+                  <div ref={scrollRef} className="palco-scroll" style={S.cifraScroll}>
                     <div style={{ ...S.cifra, fontSize: effFs, lineHeight: 1.5 }}>
                       {(() => {
                         const kON = mode === "karaoke" && karSync;
                         let activeKey = null;
                         if (kON) { for (const w of karSync.flat) { if (w.t <= kar.time) activeKey = w.li + ":" + w.wi; else break; } }
                         const setRef = (li) => (el) => { lineEls.current[li] = el; };
-                        return renderedLines.map((ln) => {
+                        const baseLines = hideTabs ? filterPerformance(renderedLines) : renderedLines;
+                        return baseLines.map((ln) => {
                           if (ln.kind === "blank") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ height: effFs * 0.7 }} />;
                           if (ln.kind === "section") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
                           if (ln.kind === "chord") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.amber, fontWeight: 700, letterSpacing: "0.04em", whiteSpace: "pre" }}>{renderChordLine(ln.text, displayShift, onChordTap)}</div>;
@@ -1751,7 +1910,8 @@ export default function Palco() {
         )}
       </div>
 
-      {popover && <ChordPopover data={popover} onClose={() => setPopover(null)} />}
+      {popovers.map((p) => <ChordPopover key={p.id} data={p} onClose={() => closePopover(p.id)} onMove={(x, y) => movePopover(p.id, x, y)} />)}
+      {popovers.length > 1 && <button className="palco-btn palco-ghost" style={S.popClearAll} onClick={() => setPopovers([])}><X size={14} strokeWidth={2.4} /> Fechar acordes ({popovers.length})</button>}
       {tunerOpen && <Tuner onClose={() => setTunerOpen(false)} />}
       {renameModal}
     </div>
@@ -1842,18 +2002,25 @@ function renderKaraokeLyric(text, words, time, li, activeKey) {
 }
 
 /* ------------------------ popover de diagrama --------------------- */
-function ChordPopover({ data, onClose }) {
+function ChordPopover({ data, onClose, onMove }) {
   const d = chordDiagram(data.name);
-  const style = { position: "fixed", left: data.left, width: 164, zIndex: 50,
-    ...(data.place === "above" ? { top: data.top, transform: "translateY(calc(-100% - 10px))" } : { top: data.top + 10 }) };
+  const startDrag = (e) => {
+    if (e.target.closest("button")) return;
+    e.preventDefault();
+    const sx = e.clientX, sy = e.clientY, ox = data.x, oy = data.y;
+    const move = (ev) => onMove(Math.max(2, ox + (ev.clientX - sx)), Math.max(2, oy + (ev.clientY - sy)));
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
   return (
-    <>
-      <div onClick={onClose} style={{ position: "fixed", inset: 0, zIndex: 49 }} />
-      <div style={{ ...style, ...S.popCard }}>
-        <div style={S.popHead}><span style={S.popName}>{data.name}</span><button className="palco-btn palco-icon" style={S.popClose} onClick={onClose}><X size={14} strokeWidth={2.4} /></button></div>
-        {d ? (<><ChordDiagram frets={d.frets} /><div style={S.popHint}>{d.approx ? "forma aproximada" : "violão · destro"}</div></>) : (<div style={S.popNone}>Diagrama indisponível para este acorde.</div>)}
+    <div style={{ ...S.popCard, left: data.x, top: data.y }}>
+      <div style={S.popHead} onPointerDown={startDrag} title="Arraste para mover">
+        <span style={S.popName}>{data.name}</span>
+        <button className="palco-btn palco-icon" style={S.popClose} onClick={onClose}><X size={13} strokeWidth={2.6} /></button>
       </div>
-    </>
+      {d ? (<><ChordDiagram frets={d.frets} /><div style={S.popHint}>{d.approx ? "forma aproximada" : "violão · destro"}</div></>) : (<div style={S.popNone}>Diagrama indisponível.</div>)}
+    </div>
   );
 }
 function ChordDiagram({ frets }) {
@@ -1861,22 +2028,22 @@ function ChordDiagram({ frets }) {
   const maxF = positives.length ? Math.max(...positives) : 0;
   const minF = positives.length ? Math.min(...positives) : 0;
   const base = maxF <= 4 ? 1 : minF;
-  const W = 132, H = 150, padX = 16, padTop = 26, gridW = W - padX * 2, FRETS = 5;
-  const sx = gridW / 5, fy = (H - padTop - 12) / FRETS;
+  const W = 104, H = 116, padX = 13, padTop = 19, gridW = W - padX * 2, FRETS = 5;
+  const sx = gridW / 5, fy = (H - padTop - 10) / FRETS;
   const stringX = (s) => padX + s * sx;
-  const dark = C.text, faint = C.textFaint;
+  const grid = NEON_GREEN, dot = "#FF4D4D", faint = C.textFaint;
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
-      {base === 1 && <rect x={padX - 1} y={padTop - 3} width={gridW + 2} height={4} fill={dark} rx={1} />}
-      {base > 1 && <text x={padX - 6} y={padTop + fy * 0.7} fontSize="11" fill={faint} textAnchor="end" fontFamily={FONT_MONO}>{base}ª</text>}
-      {Array.from({ length: FRETS + 1 }).map((_, r) => <line key={"h" + r} x1={padX} y1={padTop + r * fy} x2={padX + gridW} y2={padTop + r * fy} stroke={C.border} strokeWidth={1} />)}
-      {Array.from({ length: 6 }).map((_, s) => <line key={"v" + s} x1={stringX(s)} y1={padTop} x2={stringX(s)} y2={padTop + FRETS * fy} stroke={C.border} strokeWidth={1} />)}
+      {base === 1 && <rect x={padX - 1} y={padTop - 3} width={gridW + 2} height={3.5} fill={grid} rx={1} />}
+      {base > 1 && <text x={padX - 5} y={padTop + fy * 0.7} fontSize="9" fill={faint} textAnchor="end" fontFamily={FONT_MONO}>{base}ª</text>}
+      {Array.from({ length: FRETS + 1 }).map((_, r) => <line key={"h" + r} x1={padX} y1={padTop + r * fy} x2={padX + gridW} y2={padTop + r * fy} stroke={grid} strokeWidth={1} opacity={0.7} />)}
+      {Array.from({ length: 6 }).map((_, s) => <line key={"v" + s} x1={stringX(s)} y1={padTop} x2={stringX(s)} y2={padTop + FRETS * fy} stroke={grid} strokeWidth={1} opacity={0.7} />)}
       {frets.map((f, s) => {
         const x = stringX(s);
-        if (f === -1) return <text key={"x" + s} x={x} y={padTop - 8} fontSize="13" fill={faint} textAnchor="middle">×</text>;
-        if (f === 0) return <circle key={"o" + s} cx={x} cy={padTop - 12} r={4} fill="none" stroke={C.textDim} strokeWidth={1.5} />;
+        if (f === -1) return <text key={"x" + s} x={x} y={padTop - 7} fontSize="11" fill={faint} textAnchor="middle">×</text>;
+        if (f === 0) return <circle key={"o" + s} cx={x} cy={padTop - 10} r={3.2} fill="none" stroke={grid} strokeWidth={1.4} />;
         const row = f - base;
-        return <circle key={"d" + s} cx={x} cy={padTop + row * fy + fy / 2} r={6.5} fill={C.amber} />;
+        return <circle key={"d" + s} cx={x} cy={padTop + row * fy + fy / 2} r={5.4} fill={dot} />;
       })}
     </svg>
   );
@@ -2015,6 +2182,8 @@ const S = {
   textarea: { marginTop: 20, width: "100%", minHeight: 280, flex: "1 1 auto", resize: "vertical", background: C.surface, color: C.text, border: `1px solid ${C.border}`, borderRadius: 14, padding: "18px", fontFamily: FONT_MONO, fontSize: 14, lineHeight: 1.6 },
   errorBox: { marginTop: 14, padding: "12px 15px", background: "rgba(224,104,60,.10)", border: `1px solid rgba(224,104,60,.35)`, borderRadius: 11, color: "#eaa389", fontSize: 13.5, lineHeight: 1.5 },
   importActions: { display: "flex", gap: 12, marginTop: 18, flexWrap: "wrap" },
+  importPdfRow: { display: "flex", alignItems: "center", gap: 12, marginTop: 18, flexWrap: "wrap" },
+  importPdfHint: { fontSize: 13, color: C.textFaint },
   btnPrimary: { display: "inline-flex", alignItems: "center", gap: 9, background: C.amberDeep, color: "#1a140a", border: "none", borderRadius: 11, padding: "13px 22px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 15, cursor: "pointer" },
   btnGhost: { display: "inline-flex", alignItems: "center", gap: 8, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 11, padding: "13px 18px", fontFamily: FONT_UI, fontWeight: 500, fontSize: 14, cursor: "pointer" },
   previewHead: { display: "flex", alignItems: "center", gap: 8, marginTop: 24, marginBottom: 12, fontFamily: FONT_UI, fontWeight: 600, fontSize: 15, color: C.text },
@@ -2056,10 +2225,10 @@ const S = {
   viewerTitle: { flex: 1, fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, color: C.text, margin: 0, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", minWidth: 0 },
   headStar: { width: 36, height: 36, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, cursor: "pointer", flexShrink: 0 },
   headControls: { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 },
-  autoBtn: { display: "inline-flex", alignItems: "center", border: "1px solid", borderRadius: 10, padding: "8px 12px", cursor: "pointer" },
-  fontControls: { display: "flex", alignItems: "center", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: 4 },
-  fontBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 30, height: 30, background: "transparent", color: C.textDim, border: "none", borderRadius: 7, cursor: "pointer" },
-  fontVal: { fontFamily: FONT_MONO, fontSize: 12.5, color: C.textDim, width: 22, textAlign: "center" },
+  autoBtn: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, border: "1px solid", borderRadius: 9, cursor: "pointer", flexShrink: 0 },
+  fontControls: { display: "flex", alignItems: "center", gap: 1, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 9, padding: 2, flexShrink: 0 },
+  fontBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 28, background: "transparent", color: C.textDim, border: "none", borderRadius: 6, cursor: "pointer" },
+  fontVal: { fontFamily: FONT_MONO, fontSize: 12, color: C.textDim, width: 18, textAlign: "center" },
   toolsBar: { display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: `1px solid ${C.borderSoft}`, flexShrink: 0, flexWrap: "wrap", rowGap: 8 },
   toolGroup: { display: "flex", alignItems: "center", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "4px 6px 4px 10px", flexShrink: 0 },
   toolLabel: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.textFaint, fontWeight: 600, marginRight: 2 },
@@ -2067,6 +2236,9 @@ const S = {
   toolVal: { fontFamily: FONT_MONO, fontSize: 13, fontWeight: 600, minWidth: 26, textAlign: "center" },
   toolReset: { width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, cursor: "pointer", flexShrink: 0 },
   tunerBtn: { display: "inline-flex", alignItems: "center", gap: 7, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "8px 14px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13.5, cursor: "pointer", flexShrink: 0, marginLeft: "auto" },
+  tunerIcon: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, cursor: "pointer", flexShrink: 0 },
+  tabToggle: { display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", flexShrink: 0 },
+  tabToggleOn: { display: "inline-flex", alignItems: "center", gap: 6, background: C.amber, color: "#1a140a", border: `1px solid ${C.amber}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 },
   cifraScroll: { flex: 1, overflowY: "auto", overflowX: "auto", scrollBehavior: "auto" },
   cifra: { fontFamily: FONT_MONO, padding: "24px 26px 0", maxWidth: 900, margin: "0 auto" },
   transportZone: { padding: "0 18px calc(18px + env(safe-area-inset-bottom))", flexShrink: 0, background: `linear-gradient(to top, ${C.bg} 60%, transparent)` },
@@ -2078,12 +2250,13 @@ const S = {
   speedVal: { fontFamily: FONT_MONO, fontSize: 14, color: C.amber, fontWeight: 600 },
   speedScale: { display: "flex", justifyContent: "space-between", marginTop: 7, fontSize: 11, color: C.textFaint },
   resetBtn: { width: 44, height: 44, borderRadius: 12, background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 },
-  popCard: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: 12, boxShadow: "0 16px 50px rgba(0,0,0,.6)" },
-  popHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 },
-  popName: { fontFamily: FONT_MONO, fontSize: 16, fontWeight: 700, color: C.amber },
-  popClose: { width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textFaint, border: "none", borderRadius: 7, cursor: "pointer" },
-  popHint: { fontSize: 10.5, color: C.textFaint, textAlign: "center", marginTop: 4, letterSpacing: "0.04em" },
-  popNone: { fontSize: 12.5, color: C.textDim, padding: "10px 4px", textAlign: "center" },
+  popCard: { position: "fixed", width: 118, zIndex: 50, background: C.surface, border: `1px solid ${NEON_GREEN}55`, borderRadius: 11, padding: "7px 8px 8px", boxShadow: `0 8px 26px rgba(0,0,0,.55), 0 0 14px ${NEON_GREEN}22` },
+  popHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4, cursor: "grab", touchAction: "none", userSelect: "none" },
+  popName: { fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, color: NEON_GREEN, textShadow: `0 0 8px ${NEON_GREEN}66` },
+  popClose: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textFaint, border: "none", borderRadius: 6, cursor: "pointer" },
+  popHint: { fontSize: 9.5, color: C.textFaint, textAlign: "center", marginTop: 3, letterSpacing: "0.04em" },
+  popNone: { fontSize: 11.5, color: C.textDim, padding: "8px 4px", textAlign: "center" },
+  popClearAll: { position: "fixed", left: "50%", bottom: "calc(env(safe-area-inset-bottom) + 14px)", transform: "translateX(-50%)", zIndex: 51, display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.border}`, borderRadius: 99, padding: "8px 15px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", boxShadow: "0 6px 20px rgba(0,0,0,.5)" },
   tunerOverlay: { position: "fixed", inset: 0, background: "rgba(8,6,4,.72)", backdropFilter: "blur(3px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 60 },
   tunerCard: { width: "100%", maxWidth: 380, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, padding: 20, boxShadow: "0 24px 70px rgba(0,0,0,.6)" },
   tunerHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
