@@ -3,7 +3,8 @@ import {
   Play, Pause, ArrowLeft, ChevronLeft, Music2, ListMusic, Plus, Minus,
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
   Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
-  Clock, AlertTriangle, Pencil,
+  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Image as ImageIcon,
+  RotateCw, GripVertical,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -344,6 +345,27 @@ function fmtMMSS(s) {
   s = Math.max(0, Math.floor(s || 0));
   return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 }
+function fmtDur(secs) {
+  secs = Math.round(secs || 0);
+  const h = Math.floor(secs / 3600), m = Math.floor((secs % 3600) / 60), s = secs % 60;
+  if (h) return `${h}h ${String(m).padStart(2, "0")}m`;
+  if (m) return `${m}m ${String(s).padStart(2, "0")}s`;
+  return `${s}s`;
+}
+function fmtDateBR(ms) {
+  try { return new Date(ms).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }); } catch (e) { return ""; }
+}
+// duração aproximada de uma música: usa o sync (real) se houver, senão estima pelo tamanho da cifra
+function songDurSec(song) {
+  const sy = song && song.sync;
+  if (sy && Array.isArray(sy.lines) && sy.lines.length) {
+    const last = sy.lines[sy.lines.length - 1];
+    return Math.max(60, Math.round((last.t1 || last.t0 || 0) + 8));
+  }
+  const body = (song && song.body) || "";
+  const lines = body.split("\n").filter((l) => { const t = l.trim(); return t && !/^[\[(].+[\])]$/.test(t); }).length;
+  return Math.min(360, Math.max(90, lines * 5));
+}
 function ytId(url) {
   const m = String(url || "").match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([A-Za-z0-9_-]{11})/);
   if (m) return m[1];
@@ -452,7 +474,7 @@ const CSS = `
 
 /* ============================== APP =============================== */
 export default function Palco() {
-  const [library, setLibrary] = useState({ albums: [], favorites: [], settings: {} });
+  const [library, setLibrary] = useState({ albums: [], favorites: [], settings: {}, sessions: [], setlists: [] });
   const [ready, setReady] = useState(false);
   const [storageOK, setStorageOK] = useState(true);
 
@@ -488,6 +510,27 @@ export default function Palco() {
   const [karError, setKarError] = useState("");
   const [songImportRaw, setSongImportRaw] = useState("");          // texto colado p/ importar numa faixa do esqueleto
   const [rename, setRename] = useState(null);                      // { kind:"song"|"album", albumId, idx?, value } | null
+  const [clockRun, setClockRun] = useState(false);                 // cronômetro de palco (global)
+  const [clockSec, setClockSec] = useState(0);
+  const [pendingSongDel, setPendingSongDel] = useState(null);      // "albumId:idx" aguardando confirmação
+  const [session, setSession] = useState(null);                    // { name, startMs } | null (apresentação em curso)
+  const [sessionName, setSessionName] = useState("");              // nome digitado antes de iniciar
+  const sessionRef = useRef({ songStart: 0, curKey: null, curMeta: null, songs: {} }); // acumula tempo por música
+  const [coverFor, setCoverFor] = useState(null);                  // id do álbum cuja capa está sendo editada
+  const [coverUrl, setCoverUrl] = useState("");
+  const coverFileRef = useRef(null);
+  const [confirmAlbumDel, setConfirmAlbumDel] = useState(null);    // { id, name, count } do álbum a apagar | null
+  const [openSetId, setOpenSetId] = useState(null);                // setlist aberto (view "setlist")
+  const [editSet, setEditSet] = useState(null);                    // { id, name, parts:[refs[],refs[]] } em edição
+  const [editPart, setEditPart] = useState(0);                     // aba ativa no editor (0 ou 1)
+  const [pickerOpen, setPickerOpen] = useState(false);             // seletor de músicas aberto
+  const [pickerQuery, setPickerQuery] = useState("");
+  const [played, setPlayed] = useState(() => new Set());           // músicas marcadas como tocadas no setlist aberto
+  const [histVer, setHistVer] = useState(0);                       // versão do histórico undo/redo do editor
+  const editHist = useRef({ past: [], future: [] });
+  const [dragIdx, setDragIdx] = useState(-1);                      // linha sendo arrastada no editor
+  const editRowEls = useRef([]);
+  const dragRef = useRef(null);
 
   const scrollRef = useRef(null), rafRef = useRef(null), accRef = useRef(0), fileInputRef = useRef(null);
   const audioFileRef = useRef(null);  // <input type=file> do áudio local
@@ -513,9 +556,14 @@ export default function Palco() {
     return () => window.removeEventListener("resize", onResize);
   }, []);
   useEffect(() => {
+    if (!clockRun) return;
+    const id = setInterval(() => setClockSec((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [clockRun]);
+  useEffect(() => {
     (async () => {
       const v = await storageGet(STORAGE_KEY);
-      if (v) { try { const lib = JSON.parse(v); setLibrary({ albums: lib.albums || [], favorites: lib.favorites || [], settings: lib.settings || {} }); } catch (e) {} }
+      if (v) { try { const lib = JSON.parse(v); setLibrary({ albums: lib.albums || [], favorites: lib.favorites || [], settings: lib.settings || {}, sessions: lib.sessions || [], setlists: lib.setlists || [] }); } catch (e) {} }
       setStorageOK(storageWorks());
       setReady(true);
     })();
@@ -527,8 +575,17 @@ export default function Palco() {
   const favSet = useMemo(() => new Set(library.favorites || []), [library]);
   const favKey = (albumId, idx) => `${albumId}:${idx}`;
 
-  // músicas ativas (álbum normal ou favoritos)
+  // músicas ativas (álbum normal, favoritos ou setlist)
   const activeSongs = useMemo(() => {
+    if (typeof currentAlbumId === "string" && currentAlbumId.startsWith("set:")) {
+      const sl = (library.setlists || []).find((s) => s.id === currentAlbumId.slice(4));
+      const out = [];
+      if (sl) for (const part of [(sl.parts && sl.parts[0]) || [], (sl.parts && sl.parts[1]) || []]) for (const r of part) {
+        const al = library.albums.find((a) => a.id === r.a); const s = al && al.songs[r.i];
+        if (s) out.push({ albumId: r.a, idx: r.i, title: s.title, body: s.body, sync: s.sync || null, link: s.link || "" });
+      }
+      return out;
+    }
     if (currentAlbumId === "__fav__") {
       const out = [];
       for (const key of library.favorites || []) {
@@ -542,7 +599,36 @@ export default function Palco() {
     return al ? al.songs.map((s, i) => ({ albumId: al.id, idx: i, title: s.title, body: s.body, sync: s.sync || null, link: s.link || "" })) : [];
   }, [library, currentAlbumId]);
 
-  const currentAlbumName = currentAlbumId === "__fav__" ? "Favoritos" : (library.albums.find((a) => a.id === currentAlbumId) || {}).name || "";
+  // lista exibida na barra lateral: favoritas primeiro (preservando a ordem do álbum em cada grupo)
+  const isFavView = currentAlbumId === "__fav__";
+  const isSetlistCtx = typeof currentAlbumId === "string" && currentAlbumId.startsWith("set:");
+  const listEditable = !isFavView && !isSetlistCtx;       // reordenar/apagar só em álbuns reais
+  const displaySongs = useMemo(() => {
+    const list = activeSongs.map((s, ai) => ({ ...s, ai, fav: favSet.has(`${s.albumId}:${s.idx}`) }));
+    if (isFavView || isSetlistCtx) return list;            // favoritos e setlist mantêm a própria ordem
+    return [...list.filter((s) => s.fav), ...list.filter((s) => !s.fav)];
+  }, [activeSongs, favSet, isFavView, isSetlistCtx]);
+
+  // ranking de músicas mais tocadas (agregado de todas as sessões)
+  const ranking = useMemo(() => {
+    const agg = {};
+    for (const ses of library.sessions || []) for (const s of ses.songs || []) {
+      const k = `${s.albumId}:${s.idx}`;
+      const e = agg[k] || (agg[k] = { title: s.title, secs: 0, plays: 0 });
+      e.secs += s.secs || 0; e.plays += 1;
+    }
+    return Object.values(agg).sort((a, b) => b.secs - a.secs);
+  }, [library.sessions]);
+
+  // todas as músicas carregadas, em ordem alfabética (para montar setlists)
+  const allSongsList = useMemo(() => {
+    const out = [];
+    for (const al of library.albums) (al.songs || []).forEach((s, i) => out.push({ albumId: al.id, idx: i, title: s.title, album: al.name, dur: songDurSec(s) }));
+    out.sort((a, b) => (a.title || "").localeCompare(b.title || "", "pt", { sensitivity: "base" }));
+    return out;
+  }, [library.albums]);
+
+  const currentAlbumName = currentAlbumId === "__fav__" ? "Favoritos" : isSetlistCtx ? (((library.setlists || []).find((s) => s.id === currentAlbumId.slice(4)) || {}).name || "Setlist") : (library.albums.find((a) => a.id === currentAlbumId) || {}).name || "";
   const selectedSong = selected != null && activeSongs[selected] ? activeSongs[selected] : null;
 
   const selKey = selectedSong ? favKey(selectedSong.albumId, selectedSong.idx) : null;
@@ -636,7 +722,21 @@ export default function Palco() {
   const openSongRef = (albumId, idx) => { setCurrentAlbumId(albumId); setView("album"); setQuery(""); setTimeout(() => setSelected(idx), 0); resetSongState(); };
   const resetSongState = () => { setPlaying(false); accRef.current = 0; setPopover(null); if (scrollRef.current) scrollRef.current.scrollTop = 0; };
   const backToSongs = () => { setPlaying(false); setSelected(null); setPopover(null); };
-  const backToAlbums = () => { setPlaying(false); setSelected(null); setCurrentAlbumId(null); setView("albums"); setPopover(null); };
+  const backToAlbums = () => {
+    setPlaying(false); setSelected(null); setPopover(null);
+    if (isSetlistCtx) { setOpenSetId(currentAlbumId.slice(4)); setCurrentAlbumId(null); setView("setlist"); }
+    else { setCurrentAlbumId(null); setView("albums"); }
+  };
+  const openSetlistSong = (slId, albumId, idx) => {
+    setCurrentAlbumId("set:" + slId); setView("album"); setQuery(""); resetSongState();
+    const sl = (library.setlists || []).find((s) => s.id === slId);
+    let pos = 0, k = 0;
+    if (sl) for (const part of [(sl.parts && sl.parts[0]) || [], (sl.parts && sl.parts[1]) || []]) for (const r of part) {
+      const al = library.albums.find((a) => a.id === r.a); const s = al && al.songs[r.i];
+      if (s) { if (r.a === albumId && r.i === idx) pos = k; k++; }
+    }
+    setTimeout(() => setSelected(pos), 0);
+  };
   const resetScroll = () => { setPlaying(false); accRef.current = 0; if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "smooth" }); };
 
   /* importação */
@@ -696,7 +796,13 @@ export default function Palco() {
         for (const a of parsed.albums) if (a && a.id && Array.isArray(a.songs)) byId.set(a.id, a);
         const favs = Array.from(new Set([...(library.favorites || []), ...((parsed.favorites) || [])]));
         const settings = { ...(library.settings || {}), ...(parsed.settings || {}) };
-        commit({ albums: [...byId.values()], favorites: favs, settings });
+        const sessById = new Map((library.sessions || []).map((s) => [s.id, s]));
+        for (const s of parsed.sessions || []) if (s && s.id) sessById.set(s.id, s);
+        const sessions = [...sessById.values()].sort((a, b) => (b.start || 0) - (a.start || 0));
+        const slById = new Map((library.setlists || []).map((s) => [s.id, s]));
+        for (const s of parsed.setlists || []) if (s && s.id) slById.set(s.id, s);
+        const setlists = [...slById.values()];
+        commit({ albums: [...byId.values()], favorites: favs, settings, sessions, setlists });
         setLibMsg(`Biblioteca restaurada — ${parsed.albums.length} ${parsed.albums.length === 1 ? "álbum" : "álbuns"}.`);
       } catch (err) { setLibMsg("Arquivo inválido. Use um backup .json do Palco."); }
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -877,6 +983,48 @@ export default function Palco() {
     else patchSong(rename.albumId, rename.idx, { title: name });
     setRename(null);
   };
+  // troca duas músicas de posição (favorito + ajustes seguem a música)
+  const swapSongs = (albumId, i, j) => {
+    const al = library.albums.find((a) => a.id === albumId); if (!al) return;
+    if (i < 0 || j < 0 || i >= al.songs.length || j >= al.songs.length || i === j) return;
+    const songs = al.songs.slice(); const tmp = songs[i]; songs[i] = songs[j]; songs[j] = tmp;
+    const albums = library.albums.map((a) => a.id === albumId ? { ...a, songs } : a);
+    const fk = (k) => `${albumId}:${k}`;
+    const favs = new Set(library.favorites || []);
+    const hi = favs.has(fk(i)), hj = favs.has(fk(j));
+    favs.delete(fk(i)); favs.delete(fk(j)); if (hj) favs.add(fk(i)); if (hi) favs.add(fk(j));
+    const settings = { ...(library.settings || {}) };
+    const si = settings[fk(i)], sj = settings[fk(j)];
+    delete settings[fk(i)]; delete settings[fk(j)];
+    if (sj !== undefined) settings[fk(i)] = sj; if (si !== undefined) settings[fk(j)] = si;
+    commit({ ...library, albums, favorites: [...favs], settings });
+    setSelected((sel) => (sel === i ? j : sel === j ? i : sel));
+  };
+  const moveSong = (di, dir) => {
+    const a = displaySongs[di], b = displaySongs[di + dir];
+    if (!a || !b || a.fav !== b.fav) return;     // reordena só dentro do mesmo grupo (favoritas/restante)
+    swapSongs(a.albumId, a.idx, b.idx);
+  };
+  const deleteSong = (albumId, idx) => {
+    const al = library.albums.find((x) => x.id === albumId); if (!al) return;
+    const albums = library.albums.map((x) => x.id === albumId ? { ...x, songs: x.songs.filter((_, i) => i !== idx) } : x);
+    const pref = albumId + ":";
+    const favs = (library.favorites || []).map((k) => {
+      if (!k.startsWith(pref)) return k;
+      const ki = Number(k.slice(pref.length));
+      return ki === idx ? null : (ki > idx ? pref + (ki - 1) : k);
+    }).filter(Boolean);
+    const settings = {};
+    for (const [k, v] of Object.entries(library.settings || {})) {
+      if (!k.startsWith(pref)) { settings[k] = v; continue; }
+      const ki = Number(k.slice(pref.length));
+      if (ki === idx) continue;
+      settings[ki > idx ? pref + (ki - 1) : k] = v;
+    }
+    commit({ albums, favorites: favs, settings });
+    setPendingSongDel(null);
+    setSelected((sel) => (sel == null ? sel : sel === idx ? null : sel > idx ? sel - 1 : sel));
+  };
   const importIntoSong = () => {
     if (!selectedSong || !songImportRaw.trim()) return;
     const raw = songImportRaw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
@@ -891,6 +1039,109 @@ export default function Palco() {
     patchSong(selectedSong.albumId, selectedSong.idx, patch);
     setSongImportRaw("");
   };
+
+  // ---- sessões de apresentação (cronômetro + registro do setlist) ----
+  const startSession = () => {
+    const name = (sessionName || "").trim() || "Apresentação";
+    sessionRef.current = { songStart: Date.now(), curKey: selKey, curMeta: selectedSong ? { albumId: selectedSong.albumId, idx: selectedSong.idx, title: selectedSong.title } : null, songs: {} };
+    setSession({ name, startMs: Date.now() });
+    setClockRun(true); setClockSec(0);
+  };
+  const endSession = () => {
+    if (!session) { setClockRun(false); return; }
+    const r = sessionRef.current, now = Date.now();
+    if (r.curKey != null && r.curMeta) {
+      const e = r.songs[r.curKey] || (r.songs[r.curKey] = { ...r.curMeta, secs: 0 });
+      e.secs += (now - r.songStart) / 1000;
+    }
+    const songs = Object.values(r.songs).map((s) => ({ albumId: s.albumId, idx: s.idx, title: s.title, secs: Math.round(s.secs) })).filter((s) => s.secs > 0).sort((a, b) => b.secs - a.secs);
+    const rec = { id: "ses_" + now, name: session.name, start: session.startMs, end: now, durSec: Math.round((now - session.startMs) / 1000), songs };
+    commit({ ...library, sessions: [rec, ...(library.sessions || [])] });
+    sessionRef.current = { songStart: 0, curKey: null, curMeta: null, songs: {} };
+    setSession(null); setClockRun(false); setClockSec(0); setSessionName("");
+  };
+  const deleteSession = (id) => commit({ ...library, sessions: (library.sessions || []).filter((s) => s.id !== id) });
+
+  // ---- setlists (organização da apresentação em 2 partes) ----
+  const setlists = library.setlists || [];
+  const resolveRef = (a, i) => { const al = library.albums.find((x) => x.id === a); const s = al && al.songs[i]; return s ? { albumId: a, idx: i, title: s.title, album: al.name, dur: songDurSec(s) } : null; };
+  const partDur = (refs) => (refs || []).reduce((sum, r) => { const x = resolveRef(r.a, r.i); return sum + (x ? x.dur : 0); }, 0);
+  const setlistDur = (sl) => partDur(sl.parts && sl.parts[0]) + partDur(sl.parts && sl.parts[1]);
+  const setlistCount = (sl) => ((sl.parts && sl.parts[0]) ? sl.parts[0].length : 0) + ((sl.parts && sl.parts[1]) ? sl.parts[1].length : 0);
+  const resetHist = () => { editHist.current = { past: [], future: [] }; setHistVer(0); };
+  const newSetlist = () => { resetHist(); setEditSet({ id: "set_" + Date.now(), name: "", parts: [[], []] }); setEditPart(0); setView("setlist-edit"); };
+  const editSetlist = (sl) => { resetHist(); setEditSet({ id: sl.id, name: sl.name, parts: [(sl.parts && sl.parts[0]) ? [...sl.parts[0]] : [], (sl.parts && sl.parts[1]) ? [...sl.parts[1]] : []] }); setEditPart(0); setView("setlist-edit"); };
+  const saveSetlist = () => {
+    if (!editSet) return;
+    const rec = { id: editSet.id, name: (editSet.name || "").trim() || "Setlist", parts: editSet.parts };
+    const exists = setlists.some((s) => s.id === editSet.id);
+    commit({ ...library, setlists: exists ? setlists.map((s) => s.id === editSet.id ? rec : s) : [...setlists, rec] });
+    setEditSet(null); setOpenSetId(rec.id); setView("setlist");
+  };
+  const deleteSetlist = (id) => { commit({ ...library, setlists: setlists.filter((s) => s.id !== id) }); setView("albums"); };
+  // histórico do editor (undo/redo)
+  const snapEdit = (e) => { editHist.current.past.push(e); if (editHist.current.past.length > 60) editHist.current.past.shift(); editHist.current.future = []; setHistVer((v) => v + 1); };
+  const mutateEdit = (producer) => setEditSet((e) => { if (!e) return e; snapEdit(e); return producer(e); });
+  const undoEdit = () => setEditSet((e) => { const h = editHist.current; if (!h.past.length) return e; h.future.push(e); setHistVer((v) => v + 1); return h.past.pop(); });
+  const redoEdit = () => setEditSet((e) => { const h = editHist.current; if (!h.future.length) return e; h.past.push(e); setHistVer((v) => v + 1); return h.future.pop(); });
+  const addToPart = (ref) => mutateEdit((e) => { const parts = e.parts.map((p) => [...p]); parts[editPart] = [...parts[editPart], { a: ref.albumId, i: ref.idx }]; return { ...e, parts }; });
+  const removeFromPart = (pi, i) => mutateEdit((e) => { const parts = e.parts.map((p) => [...p]); parts[pi].splice(i, 1); return { ...e, parts }; });
+  const moveInPart = (pi, i, dir) => mutateEdit((e) => { const parts = e.parts.map((p) => [...p]); const j = i + dir; if (j < 0 || j >= parts[pi].length) return e; const t = parts[pi][i]; parts[pi][i] = parts[pi][j]; parts[pi][j] = t; return { ...e, parts }; });
+  const togglePlayed = (key) => setPlayed((p) => { const n = new Set(p); n.has(key) ? n.delete(key) : n.add(key); return n; });
+  // arrastar para reordenar dentro de uma parte
+  const reorderEdit = (pi, from, to) => setEditSet((e) => { if (!e) return e; const parts = e.parts.map((p) => [...p]); const arr = parts[pi]; if (from < 0 || from >= arr.length || to < 0 || to >= arr.length) return e; const [it] = arr.splice(from, 1); arr.splice(to, 0, it); return { ...e, parts }; });
+  const startDrag = (e, i) => {
+    e.preventDefault();
+    editHist.current.past.push(editSet); if (editHist.current.past.length > 60) editHist.current.past.shift(); editHist.current.future = []; setHistVer((v) => v + 1);
+    dragRef.current = { from: i, pi: editPart };
+    setDragIdx(i);
+    const move = (ev) => {
+      if (!dragRef.current) return;
+      const y = ev.clientY, els = editRowEls.current.filter(Boolean);
+      let target = els.length - 1;
+      for (let k = 0; k < els.length; k++) { const r = els[k].getBoundingClientRect(); if (y < r.top + r.height / 2) { target = k; break; } }
+      const from = dragRef.current.from;
+      if (target !== from) { reorderEdit(dragRef.current.pi, from, target); dragRef.current.from = target; setDragIdx(target); }
+    };
+    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); dragRef.current = null; setDragIdx(-1); };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  };
+
+  // ---- capa do álbum (upload redimensionado ou link) ----
+  const onCoverFile = (e) => {
+    const file = e.target.files && e.target.files[0]; if (!file || !coverFor) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 400, scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const canvas = document.createElement("canvas"); canvas.width = w; canvas.height = h;
+        canvas.getContext("2d").drawImage(img, 0, 0, w, h);
+        try { patchAlbum(coverFor, { cover: canvas.toDataURL("image/jpeg", 0.82) }); } catch (err) {}
+        setCoverFor(null);
+      };
+      img.src = reader.result;
+    };
+    reader.readAsDataURL(file);
+    if (coverFileRef.current) coverFileRef.current.value = "";
+  };
+  const setCoverFromUrl = () => { if (coverFor && coverUrl.trim()) { patchAlbum(coverFor, { cover: coverUrl.trim() }); setCoverFor(null); setCoverUrl(""); } };
+  const removeCover = () => { if (coverFor) { patchAlbum(coverFor, { cover: "" }); setCoverFor(null); setCoverUrl(""); } };
+  // acumula o tempo de exibição de cada música enquanto a sessão está ativa
+  useEffect(() => {
+    if (!session) return;
+    const r = sessionRef.current, now = Date.now();
+    if (r.curKey != null && r.curMeta) {
+      const e = r.songs[r.curKey] || (r.songs[r.curKey] = { ...r.curMeta, secs: 0 });
+      e.secs += (now - r.songStart) / 1000;
+    }
+    r.curKey = selKey;
+    r.curMeta = selectedSong ? { albumId: selectedSong.albumId, idx: selectedSong.idx, title: selectedSong.title } : null;
+    r.songStart = now;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selKey]);
 
   // aplica volume/mudo quando mudam
   useEffect(() => { karApplyAudio(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [karMuted, karVol]);
@@ -928,6 +1179,207 @@ export default function Palco() {
     </div>
   ) : null;
 
+  const coverModal = coverFor != null ? (
+    <div style={S.tunerOverlay} onClick={() => setCoverFor(null)}>
+      <div style={S.renameCard} onClick={(e) => e.stopPropagation()}>
+        <div style={S.tunerHead}><span style={S.tunerTitle}>Capa do álbum</span><button className="palco-btn palco-icon" style={S.popClose} onClick={() => setCoverFor(null)}><X size={16} strokeWidth={2.3} /></button></div>
+        <input ref={coverFileRef} type="file" accept="image/*" onChange={onCoverFile} style={{ display: "none" }} />
+        <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, width: "100%", justifyContent: "center", marginTop: 12 }} onClick={() => coverFileRef.current && coverFileRef.current.click()}><Upload size={16} strokeWidth={2.2} /> Enviar imagem do aparelho</button>
+        <div style={{ fontSize: 12, color: C.textFaint, textAlign: "center", margin: "12px 0 6px" }}>ou cole o link de uma imagem (capa da internet)</div>
+        <input className="palco-input" style={S.input} value={coverUrl} onChange={(e) => setCoverUrl(e.target.value)} placeholder="https://.../capa.jpg" onKeyDown={(e) => { if (e.key === "Enter") setCoverFromUrl(); }} />
+        <div style={{ display: "flex", gap: 10, marginTop: 14, justifyContent: "space-between" }}>
+          <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={removeCover}>Remover capa</button>
+          <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={setCoverFromUrl}>Usar link</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  const confirmDelModal = confirmAlbumDel != null ? (
+    <div style={S.tunerOverlay} onClick={() => setConfirmAlbumDel(null)}>
+      <div style={S.renameCard} onClick={(e) => e.stopPropagation()}>
+        <div style={S.tunerHead}><span style={S.tunerTitle}>Apagar álbum</span><button className="palco-btn palco-icon" style={S.popClose} onClick={() => setConfirmAlbumDel(null)}><X size={16} strokeWidth={2.3} /></button></div>
+        <p style={{ fontSize: 14, color: C.textDim, lineHeight: 1.55, margin: "12px 0 0" }}>Apagar o álbum <strong style={{ color: C.text }}>"{confirmAlbumDel.name}"</strong>? Isso remove {confirmAlbumDel.count} {confirmAlbumDel.count === 1 ? "música" : "músicas"} e não pode ser desfeito.</p>
+        <div style={{ display: "flex", gap: 10, marginTop: 18, justifyContent: "flex-end" }}>
+          <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={() => setConfirmAlbumDel(null)}>Cancelar</button>
+          <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={() => { deleteAlbum(confirmAlbumDel.id); setConfirmAlbumDel(null); }}><Trash2 size={16} strokeWidth={2.2} /> Apagar</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+
+  // cronômetro de palco — só aparece com uma apresentação em curso; discreto, fixo, em todas as telas
+  const clkLabel = (() => { const h = Math.floor(clockSec / 3600), m = Math.floor((clockSec % 3600) / 60), s = clockSec % 60; const p = (n) => String(n).padStart(2, "0"); return (h ? p(h) + ":" : "") + p(m) + ":" + p(s); })();
+  const stageClock = session ? (
+    <div style={S.stageClockFixed}>
+      <span className="neon-pulse" style={S.sessionDot} />
+      <span style={S.sessionPillName}>{session.name}</span>
+      <span style={{ fontFamily: FONT_MONO, fontSize: 12.5, fontWeight: 700, color: C.text, minWidth: 46, textAlign: "center" }}>{clkLabel}</span>
+      <button className="palco-btn" style={{ ...S.stageClockBtn, color: C.red }} onClick={endSession} title="Encerrar apresentação"><Square size={11} strokeWidth={2.6} fill="currentColor" /></button>
+    </div>
+  ) : null;
+
+  /* --------------------------- SESSÕES ----------------------------- */
+  if (view === "sessions") {
+    return (
+      <div className="palco-root" style={S.page}>
+        <style>{CSS}</style>
+        <div style={S.glow} />
+        {stageClock}
+        <div className="palco-scroll" style={S.albumsWrap}>
+          <button className="palco-btn palco-icon" style={S.importBack} onClick={() => setView("albums")}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Início</span></button>
+          <h1 style={S.importTitle}>Sessões & Ranking</h1>
+
+          <div style={S.sessionSecTitle}><BarChart3 size={16} color={C.amber} strokeWidth={2.2} /> Músicas mais tocadas</div>
+          {ranking.length === 0 ? (
+            <p style={S.emptySub}>Ainda não há dados. Inicie uma apresentação no início e toque algumas músicas.</p>
+          ) : (
+            <div style={{ marginTop: 8 }}>
+              {ranking.slice(0, 30).map((r, i) => (
+                <div key={i} style={S.rankRow}>
+                  <span style={{ ...S.rankPos, color: i < 3 ? C.amber : C.textFaint }}>{i + 1}</span>
+                  <span style={S.rankTitle}>{r.title}</span>
+                  <span style={S.rankMeta}>{fmtDur(r.secs)} · {r.plays}×</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ ...S.sessionSecTitle, marginTop: 30 }}><Clock size={16} color={C.amber} strokeWidth={2.2} /> Histórico de sessões</div>
+          {(library.sessions || []).length === 0 ? (
+            <p style={S.emptySub}>Nenhuma apresentação registrada ainda.</p>
+          ) : (
+            <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 12 }}>
+              {(library.sessions || []).map((ses) => (
+                <div key={ses.id} style={S.sesCard}>
+                  <div style={S.sesHead}>
+                    <div style={{ minWidth: 0 }}><div style={S.sesName}>{ses.name}</div><div style={S.sesDate}>{fmtDateBR(ses.start)} · {(ses.songs || []).length} {(ses.songs || []).length === 1 ? "música" : "músicas"}</div></div>
+                    <div style={S.sesDur}>{fmtDur(ses.durSec)}</div>
+                    <button className="palco-btn palco-trash" style={S.songActBtn} onClick={() => deleteSession(ses.id)} title="Apagar registro"><Trash2 size={14} strokeWidth={2.1} /></button>
+                  </div>
+                  {(ses.songs || []).length > 0 && (
+                    <div style={S.sesSetlist}>
+                      {ses.songs.map((s, i) => (<div key={i} style={S.sesSong}><span style={S.sesSongTitle}>{s.title}</span><span style={S.sesSongTime}>{fmtDur(s.secs)}</span></div>))}
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+        {renameModal}
+      </div>
+    );
+  }
+
+  /* --------------------------- SETLIST (ver) ----------------------- */
+  if (view === "setlist") {
+    const sl = setlists.find((s) => s.id === openSetId);
+    const renderPart = (pi, label, base) => (
+      <div>
+        <div style={S.setlistPartHead}>{label} · {(sl.parts[pi] || []).length} {(sl.parts[pi] || []).length === 1 ? "música" : "músicas"} · ~{fmtDur(partDur(sl.parts[pi]))}</div>
+        {(sl.parts[pi] || []).map((r, i) => { const x = resolveRef(r.a, r.i); if (!x) return null; const key = x.albumId + ":" + x.idx; const done = played.has(key); return (
+          <div key={i} className="palco-song palco-btn" style={{ ...S.setlistSong, opacity: done ? 0.5 : 1 }} onClick={() => openSetlistSong(sl.id, x.albumId, x.idx)} role="button" tabIndex={0}>
+            <button className="palco-btn" style={done ? S.checkOn : S.checkOff} onClick={(e) => { e.stopPropagation(); togglePlayed(key); }} title={done ? "Desmarcar" : "Marcar como tocada"}>{done && <Check size={12} strokeWidth={3} color="#1a140a" />}</button>
+            <span style={S.songMeta}><span style={{ ...S.songTitle, color: C.text, textDecoration: done ? "line-through" : "none" }}>{x.title}</span><span style={S.songSub}>{x.album}</span></span>
+            <span style={S.setlistSongDur}>~{fmtDur(x.dur)}</span>
+          </div>
+        ); })}
+        {(sl.parts[pi] || []).length === 0 && <p style={{ ...S.emptySub, padding: "6px 4px" }}>Parte vazia.</p>}
+      </div>
+    );
+    return (
+      <div className="palco-root" style={S.page}>
+        <style>{CSS}</style>
+        <div style={S.glow} />
+        {stageClock}
+        <div className="palco-scroll" style={S.albumsWrap}>
+          <button className="palco-btn palco-icon" style={S.importBack} onClick={() => setView("albums")}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Início</span></button>
+          {!sl ? <p style={S.emptySub}>Setlist não encontrado.</p> : (<>
+            <div style={S.setlistViewHead}>
+              <div style={{ minWidth: 0 }}><h1 style={{ ...S.importTitle, margin: 0 }}>{sl.name}</h1><div style={{ ...S.albumCount, marginTop: 4 }}>{setlistCount(sl)} músicas · tempo aproximado <strong style={{ color: C.amber }}>~{fmtDur(setlistDur(sl))}</strong></div></div>
+              <div style={{ display: "flex", gap: 8, flexShrink: 0 }}>
+                {played.size > 0 && <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={() => setPlayed(new Set())} title="Limpar marcações">Limpar</button>}
+                <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={() => editSetlist(sl)}><Pencil size={16} strokeWidth={2.1} /> Editar</button>
+              </div>
+            </div>
+            <div style={{ marginTop: 18 }}>{renderPart(0, "Parte 1", 0)}</div>
+            <div style={S.setlistInterval}>— intervalo —</div>
+            <div>{renderPart(1, "Parte 2", (sl.parts[0] || []).length)}</div>
+          </>)}
+        </div>
+        {renameModal}
+      </div>
+    );
+  }
+
+  /* --------------------------- SETLIST (editar) -------------------- */
+  if (view === "setlist-edit" && editSet) {
+    const refs = editSet.parts[editPart] || [];
+    const inSet = new Set([...(editSet.parts[0] || []), ...(editSet.parts[1] || [])].map((r) => r.a + ":" + r.i));
+    const canUndo = editHist.current.past.length > 0;
+    const canRedo = editHist.current.future.length > 0;
+    return (
+      <div className="palco-root" style={S.page}>
+        <style>{CSS}</style>
+        <div style={S.glow} />
+        {stageClock}
+        <div className="palco-scroll" style={S.importWrap}>
+          <div style={S.setlistViewHead}>
+            <button className="palco-btn palco-icon" style={S.importBack} onClick={() => { setEditSet(null); setView(openSetId ? "setlist" : "albums"); }}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Voltar</span></button>
+            <div style={{ display: "flex", gap: 6, marginLeft: "auto", alignItems: "center" }}>
+              <button className="palco-btn palco-icon" style={{ ...S.ugTool, opacity: canUndo ? 1 : 0.35 }} disabled={!canUndo} onClick={undoEdit} title="Desfazer"><RotateCcw size={15} strokeWidth={2.2} /></button>
+              <button className="palco-btn palco-icon" style={{ ...S.ugTool, opacity: canRedo ? 1 : 0.35 }} disabled={!canRedo} onClick={redoEdit} title="Refazer"><RotateCw size={15} strokeWidth={2.2} /></button>
+              <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={saveSetlist}><Check size={16} strokeWidth={2.4} /> Salvar</button>
+            </div>
+          </div>
+          <input className="palco-input" style={{ ...S.input, marginTop: 14, fontSize: 17, fontWeight: 600 }} value={editSet.name} onChange={(e) => setEditSet({ ...editSet, name: e.target.value })} placeholder="Nome do setlist (ex: Show acústico)" />
+          <div style={S.partTabs}>
+            {[0, 1].map((pi) => (
+              <button key={pi} className="palco-btn" style={editPart === pi ? S.partTabActive : S.partTab} onClick={() => setEditPart(pi)}>Parte {pi + 1} <span style={S.partTabMeta}>{(editSet.parts[pi] || []).length} · ~{fmtDur(partDur(editSet.parts[pi]))}</span></button>
+            ))}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            {refs.length === 0 && <p style={S.emptySub}>Nenhuma música nesta parte. Use "Adicionar músicas".</p>}
+            {refs.map((r, i) => { const x = resolveRef(r.a, r.i); return (
+              <div key={i} ref={(el) => { editRowEls.current[i] = el; }} style={{ ...S.setlistEditSong, opacity: dragIdx === i ? 0.5 : 1, borderColor: dragIdx === i ? C.amber : C.borderSoft }}>
+                <button className="palco-btn" style={S.dragHandle} onPointerDown={(e) => startDrag(e, i)} title="Arraste para reordenar"><GripVertical size={16} strokeWidth={2} /></button>
+                <span style={S.setlistSongNum}>{i + 1}</span>
+                <span style={S.songMeta}><span style={{ ...S.songTitle, color: C.text }}>{x ? x.title : "—"}</span><span style={S.songSub}>{x ? x.album : "(removida)"} · ~{x ? fmtDur(x.dur) : "?"}</span></span>
+                <div style={S.songActions}>
+                  <button className="palco-btn palco-icon" style={{ ...S.songActBtn, opacity: i === 0 ? 0.3 : 1 }} disabled={i === 0} onClick={() => moveInPart(editPart, i, -1)}><ChevronUp size={15} strokeWidth={2.3} /></button>
+                  <button className="palco-btn palco-icon" style={{ ...S.songActBtn, opacity: i === refs.length - 1 ? 0.3 : 1 }} disabled={i === refs.length - 1} onClick={() => moveInPart(editPart, i, 1)}><ChevronDown size={15} strokeWidth={2.3} /></button>
+                  <button className="palco-btn palco-trash" style={S.songActBtn} onClick={() => removeFromPart(editPart, i)}><X size={14} strokeWidth={2.2} /></button>
+                </div>
+              </div>
+            ); })}
+          </div>
+          <button className="palco-btn palco-ghost" style={{ ...S.btnGhost, marginTop: 14, width: "100%", justifyContent: "center" }} onClick={() => { setPickerQuery(""); setPickerOpen(true); }}><Plus size={16} strokeWidth={2.4} /> Adicionar músicas à Parte {editPart + 1}</button>
+          <div style={S.setlistTotal}>Tempo total aproximado do show: <strong style={{ color: C.amber }}>~{fmtDur(partDur(editSet.parts[0]) + partDur(editSet.parts[1]))}</strong></div>
+          {setlists.some((s) => s.id === editSet.id) && <button className="palco-btn" style={{ ...S.btnGhost, marginTop: 18, color: C.red, borderColor: "rgba(224,104,60,.4)" }} onClick={() => deleteSetlist(editSet.id)}><Trash2 size={15} strokeWidth={2.1} /> Apagar setlist</button>}
+        </div>
+        {pickerOpen && (
+          <div style={S.tunerOverlay} onClick={() => setPickerOpen(false)}>
+            <div style={S.pickerCard} onClick={(e) => e.stopPropagation()}>
+              <div style={S.tunerHead}><span style={S.tunerTitle}>Adicionar à Parte {editPart + 1}</span><button className="palco-btn palco-icon" style={S.popClose} onClick={() => setPickerOpen(false)}><X size={16} strokeWidth={2.3} /></button></div>
+              <div style={{ ...S.searchWrap, margin: "10px 0" }}><Search size={16} color={C.textFaint} strokeWidth={2} /><input className="palco-input" style={S.searchInput} value={pickerQuery} onChange={(e) => setPickerQuery(e.target.value)} placeholder="Buscar música ou artista…" /></div>
+              <div className="palco-scroll" style={S.pickerList}>
+                {allSongsList.length === 0 && <p style={S.emptySub}>Nenhuma música carregada. Importe álbuns primeiro.</p>}
+                {allSongsList.filter((s) => !pickerQuery.trim() || (s.title + " " + s.album).toLowerCase().includes(pickerQuery.trim().toLowerCase())).map((s) => { const added = inSet.has(s.albumId + ":" + s.idx); return (
+                  <button key={s.albumId + ":" + s.idx} className="palco-btn palco-song" style={{ ...S.pickerRow, opacity: added ? 0.45 : 1, cursor: added ? "default" : "pointer" }} disabled={added} onClick={() => { if (!added) addToPart(s); }}>
+                    <span style={S.songMeta}><span style={{ ...S.songTitle, color: C.text, textDecoration: added ? "line-through" : "none" }}>{s.title}</span><span style={S.songSub}>{s.album} · ~{fmtDur(s.dur)}{added ? " · já no setlist" : ""}</span></span>
+                    {added ? <Check size={16} color={C.teal} strokeWidth={2.4} /> : <Plus size={16} color={C.amber} strokeWidth={2.4} />}
+                  </button>
+                ); })}
+              </div>
+              <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, width: "100%", justifyContent: "center", marginTop: 10 }} onClick={() => setPickerOpen(false)}>Concluir</button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
   /* ----------------------------- ALBUMS ---------------------------- */
   if (view === "albums") {
     const favCount = (library.favorites || []).filter((k) => { const aid = k.slice(0, k.lastIndexOf(":")); const i = Number(k.slice(k.lastIndexOf(":") + 1)); const al = library.albums.find((a) => a.id === aid); return al && al.songs[i]; }).length;
@@ -935,6 +1387,7 @@ export default function Palco() {
       <div className="palco-root" style={S.page}>
         <style>{CSS}</style>
         <div style={S.glow} />
+        {stageClock}
         <div className="palco-scroll" style={S.albumsWrap}>
           <div style={S.albumsHead}>
             <Wordmark />
@@ -942,6 +1395,7 @@ export default function Palco() {
               <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={importLibraryFile} style={{ display: "none" }} />
               <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={triggerImport} title="Restaurar de um backup"><Upload size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Restaurar</span></button>
               <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={exportLibrary} title="Salvar backup"><Download size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Backup</span></button>
+              <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={() => setView("sessions")} title="Histórico e ranking"><BarChart3 size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Sessões</span></button>
               <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={goImport}><FolderPlus size={18} strokeWidth={2.2} /> Importar álbum</button>
             </div>
           </div>
@@ -950,6 +1404,39 @@ export default function Palco() {
             <Search size={17} color={C.textFaint} strokeWidth={2} />
             <input className="palco-input" style={S.searchInput} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar música ou álbum…" />
             {query && <button className="palco-btn palco-icon" style={S.searchClear} onClick={() => setQuery("")}><X size={15} strokeWidth={2.2} /></button>}
+          </div>
+
+          <div style={S.sessionCard}>
+            <div style={S.sessionCardTop}><Radio size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Apresentação ao vivo</span></div>
+            {session ? (
+              <div style={S.sessionRow}>
+                <span style={S.sessionLive}><span className="neon-pulse" style={S.sessionDot} /> {session.name} · <span style={{ fontFamily: FONT_MONO, fontWeight: 700, color: C.text }}>{clkLabel}</span></span>
+                <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={endSession}><Square size={15} strokeWidth={2.4} fill="#fff" /> Encerrar</button>
+              </div>
+            ) : (
+              <div style={S.sessionRow}>
+                <input className="palco-input" style={{ ...S.input, flex: 1, minWidth: 160 }} value={sessionName} onChange={(e) => setSessionName(e.target.value)} placeholder="Nome da apresentação (ex: Bar do Zé)" onKeyDown={(e) => { if (e.key === "Enter") startSession(); }} />
+                <button className="palco-btn palco-primary neon" style={S.btnPrimary} onClick={startSession}><Play size={16} strokeWidth={2.4} fill="#1a140a" /> Iniciar</button>
+              </div>
+            )}
+            <p style={S.sessionHint}>O cronômetro só aparece nas telas quando há apresentação rodando. Ao encerrar, o setlist e o tempo de cada música ficam salvos em <strong>Sessões</strong>.</p>
+          </div>
+
+          <div style={S.setlistHome}>
+            <div style={S.sectionHead}><ListMusic size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Setlists</span><button className="palco-btn palco-ghost" style={{ ...S.iconGhost, marginLeft: "auto" }} onClick={newSetlist}><Plus size={15} strokeWidth={2.4} /> Criar setlist</button></div>
+            {setlists.length === 0 ? (
+              <p style={S.sessionHint}>Monte a ordem do show em 2 partes, escolhendo entre todas as músicas e vendo o tempo aproximado total.</p>
+            ) : (
+              <div style={S.setlistCardRow}>
+                {setlists.map((sl) => (
+                  <div key={sl.id} className="palco-album palco-btn" style={S.setlistHomeCard} onClick={() => { setPlayed(new Set()); setOpenSetId(sl.id); setView("setlist"); }} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && (setPlayed(new Set()), setOpenSetId(sl.id), setView("setlist"))}>
+                    <div style={S.setlistHomeIcon}><ListMusic size={20} color={C.amber} strokeWidth={2} /></div>
+                    <div style={S.albumName}>{sl.name}</div>
+                    <div style={S.albumCount}>{setlistCount(sl)} músicas · ~{fmtDur(setlistDur(sl))}</div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {libMsg && <div style={S.libMsg}>{libMsg}</div>}
@@ -987,19 +1474,13 @@ export default function Palco() {
               )}
               {library.albums.map((a) => (
                 <div key={a.id} className="palco-album palco-btn" style={S.albumCard} onClick={() => openAlbum(a.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && openAlbum(a.id)}>
-                  <div style={S.albumTop}>
-                    <div style={S.albumIcon}><Disc3 className="palco-disc" size={22} color={C.textDim} strokeWidth={1.8} /></div>
-                    {pendingDelete === a.id ? (
-                      <div style={S.confirmRow} onClick={(e) => e.stopPropagation()}>
-                        <button className="palco-btn" style={S.confirmYes} onClick={() => deleteAlbum(a.id)}><Check size={14} strokeWidth={2.6} /></button>
-                        <button className="palco-btn" style={S.confirmNo} onClick={() => setPendingDelete(null)}><Minus size={14} strokeWidth={2.6} /></button>
-                      </div>
-                    ) : (
-                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
-                        <button className="palco-btn palco-icon" style={S.albumTrash} onClick={(e) => { e.stopPropagation(); setRename({ kind: "album", albumId: a.id, value: a.name }); }} title="Renomear álbum"><Pencil size={14} strokeWidth={2.1} /></button>
-                        <button className="palco-btn palco-trash" style={S.albumTrash} onClick={(e) => { e.stopPropagation(); setPendingDelete(a.id); }} title="Apagar álbum"><Trash2 size={15} strokeWidth={2} /></button>
-                      </div>
-                    )}
+                  <div style={S.albumCover}>
+                    {a.cover ? <img src={a.cover} alt="" style={S.albumCoverImg} /> : <div style={S.albumCoverEmpty}><Disc3 className="palco-disc" size={38} color={C.textFaint} strokeWidth={1.5} /></div>}
+                    <div style={S.albumCoverBtns} onClick={(e) => e.stopPropagation()}>
+                      <button className="palco-btn" style={S.coverBtn} onClick={() => { setCoverUrl(typeof a.cover === "string" && !a.cover.startsWith("data:") ? a.cover : ""); setCoverFor(a.id); }} title="Capa do álbum"><ImageIcon size={13} strokeWidth={2.1} /></button>
+                      <button className="palco-btn" style={S.coverBtn} onClick={() => setRename({ kind: "album", albumId: a.id, value: a.name })} title="Renomear álbum"><Pencil size={13} strokeWidth={2.1} /></button>
+                      <button className="palco-btn" style={S.coverBtn} onClick={() => setConfirmAlbumDel({ id: a.id, name: a.name, count: a.songs.length })} title="Apagar álbum"><Trash2 size={13} strokeWidth={2} /></button>
+                    </div>
                   </div>
                   <div style={S.albumName}>{a.name}</div>
                   <div style={S.albumCount}>{a.songs.length} {a.songs.length === 1 ? "música" : "músicas"}</div>
@@ -1009,6 +1490,8 @@ export default function Palco() {
           )}
         </div>
         {renameModal}
+        {coverModal}
+        {confirmDelModal}
       </div>
     );
   }
@@ -1019,6 +1502,7 @@ export default function Palco() {
       <div className="palco-root" style={S.page}>
         <style>{CSS}</style>
         <div style={S.glow} />
+        {stageClock}
         <div className="palco-scroll" style={S.importWrap}>
           <button className="palco-btn palco-icon" style={S.importBack} onClick={() => (library.albums.length ? backToAlbums() : null)}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Álbuns</span></button>
           <h1 style={S.importTitle}>Importar álbum</h1>
@@ -1065,6 +1549,7 @@ export default function Palco() {
   return (
     <div className="palco-root" style={S.page}>
       <style>{CSS}</style>
+      {stageClock}
       <div style={S.appShell}>
         {showSidebar && (
           <aside style={{ ...S.sidebar, width: isMobile ? "100%" : 320, borderRight: isMobile ? "none" : `1px solid ${C.borderSoft}` }}>
@@ -1075,14 +1560,31 @@ export default function Palco() {
             <div style={S.repHeader}><span style={S.albumNameSide}>{currentAlbumName}</span><span style={S.repCount}>{activeSongs.length} {activeSongs.length === 1 ? "música" : "músicas"}</span></div>
             <div className="palco-scroll" style={S.songList}>
               {activeSongs.length === 0 && <div style={{ padding: "20px 14px", color: C.textFaint, fontSize: 13.5 }}>{currentAlbumId === "__fav__" ? "Nenhum favorito ainda. Toque na estrela de uma música." : "Álbum vazio."}</div>}
-              {activeSongs.map((s, i) => {
-                const active = i === selected;
-                const fav = favSet.has(favKey(s.albumId, s.idx));
+              {displaySongs.map((s, di) => {
+                const active = s.ai === selected;
+                const key = `${s.albumId}:${s.idx}`;
+                const confirming = pendingSongDel === key;
+                const canUp = listEditable && di > 0 && displaySongs[di - 1].fav === s.fav;
+                const canDown = listEditable && di < displaySongs.length - 1 && displaySongs[di + 1].fav === s.fav;
                 return (
-                  <div key={i} className="palco-song palco-btn" style={{ ...S.songItem, background: active ? C.surface2 : "transparent", borderColor: active ? C.border : "transparent" }} onClick={() => openSong(i)} role="button" tabIndex={0}>
-                    <span style={{ ...S.songNum, color: active ? C.amber : C.textFaint, borderColor: active ? C.amberDeep : C.borderSoft }}>{String(i + 1).padStart(2, "0")}</span>
+                  <div key={key} className="palco-song palco-btn" style={{ ...S.songItem, background: active ? C.surface2 : "transparent", borderColor: active ? C.border : "transparent" }} onClick={() => openSong(s.ai)} role="button" tabIndex={0}>
+                    <span style={{ ...S.songNum, color: active ? C.amber : C.textFaint, borderColor: active ? C.amberDeep : C.borderSoft }}>{String(di + 1).padStart(2, "0")}</span>
                     <span style={S.songMeta}><span style={{ ...S.songTitle, color: active ? C.text : C.textDim }}>{s.title}</span><span style={S.songSub}>{(s.body ? s.body.split("\n").filter((l) => l.trim()).length : 0)} linhas</span></span>
-                    <button className="palco-btn palco-star" style={{ ...S.starBtn, color: fav ? C.amber : C.textFaint }} onClick={(e) => { e.stopPropagation(); toggleFav(s.albumId, s.idx); }} title={fav ? "Remover dos favoritos" : "Favoritar"}><Star size={15} fill={fav ? C.amber : "none"} strokeWidth={2} /></button>
+                    <div style={S.songActions} onClick={(e) => e.stopPropagation()}>
+                      {confirming ? (
+                        <>
+                          <button className="palco-btn" style={S.confirmYes} onClick={() => deleteSong(s.albumId, s.idx)} title="Confirmar exclusão"><Check size={13} strokeWidth={2.6} /></button>
+                          <button className="palco-btn" style={S.confirmNo} onClick={() => setPendingSongDel(null)} title="Cancelar"><X size={13} strokeWidth={2.6} /></button>
+                        </>
+                      ) : (
+                        <>
+                          <button className="palco-btn palco-star" style={{ ...S.songActBtn, color: s.fav ? C.amber : C.textFaint }} onClick={() => toggleFav(s.albumId, s.idx)} title={s.fav ? "Remover dos favoritos" : "Favoritar"}><Star size={15} fill={s.fav ? C.amber : "none"} strokeWidth={2} /></button>
+                          {listEditable && <button className="palco-btn palco-icon" style={{ ...S.songActBtn, opacity: canUp ? 1 : 0.28, cursor: canUp ? "pointer" : "default" }} disabled={!canUp} onClick={() => moveSong(di, -1)} title="Mover para cima"><ChevronUp size={15} strokeWidth={2.3} /></button>}
+                          {listEditable && <button className="palco-btn palco-icon" style={{ ...S.songActBtn, opacity: canDown ? 1 : 0.28, cursor: canDown ? "pointer" : "default" }} disabled={!canDown} onClick={() => moveSong(di, 1)} title="Mover para baixo"><ChevronDown size={15} strokeWidth={2.3} /></button>}
+                          {listEditable && <button className="palco-btn palco-trash" style={S.songActBtn} onClick={() => setPendingSongDel(key)} title="Apagar música"><Trash2 size={14} strokeWidth={2.1} /></button>}
+                        </>
+                      )}
+                    </div>
                   </div>
                 );
               })}
@@ -1140,10 +1642,11 @@ export default function Palco() {
                   {selectedSong.link && <a href={selectedSong.link} target="_blank" rel="noreferrer" style={{ ...S.ugTool, marginLeft: mode === "free" ? 0 : "auto" }} title="Abrir cifra no Ultimate-Guitar"><FileText size={14} strokeWidth={2.1} /></a>}
                 </div>
 
-                <div style={S.stageBar}>
-                  <StageClock />
-                  {capo > 0 && <div className="neon-pulse" style={S.capoBanner}><AlertTriangle size={15} strokeWidth={2.6} /> CAPO NA {capo}ª CASA</div>}
-                </div>
+                {capo > 0 && (
+                  <div style={S.stageBar}>
+                    <div className="neon-pulse" style={S.capoBanner}><AlertTriangle size={15} strokeWidth={2.6} /> CAPO NA {capo}ª CASA</div>
+                  </div>
+                )}
 
                 <div style={S.cifraWrap}>
                   <div ref={scrollRef} className="palco-scroll" style={S.cifraScroll} onScroll={() => popover && setPopover(null)}>
@@ -1470,27 +1973,6 @@ function Wordmark({ small }) {
   );
 }
 
-/* ----------------- cronômetro de palco (pausa/zera) --------------- */
-function StageClock() {
-  const [run, setRun] = useState(false);
-  const [sec, setSec] = useState(0);
-  useEffect(() => {
-    if (!run) return;
-    const id = setInterval(() => setSec((s) => s + 1), 1000);
-    return () => clearInterval(id);
-  }, [run]);
-  const p = (n) => String(n).padStart(2, "0");
-  const hh = Math.floor(sec / 3600), mm = Math.floor((sec % 3600) / 60), ss = sec % 60;
-  return (
-    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: FONT_MONO }}>
-      <Clock size={14} strokeWidth={2.2} color={run ? C.amber : C.textFaint} />
-      <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: "0.04em", color: run ? C.text : C.textDim, minWidth: hh ? 70 : 50, textAlign: "right" }}>{hh ? p(hh) + ":" : ""}{p(mm)}:{p(ss)}</span>
-      <button className="palco-btn palco-icon" style={S.clockBtn} onClick={() => setRun((r) => !r)} title={run ? "Pausar cronômetro" : "Iniciar cronômetro"}>{run ? <Pause size={13} strokeWidth={2.4} /> : <Play size={13} strokeWidth={2.4} fill="currentColor" style={{ marginLeft: 1 }} />}</button>
-      <button className="palco-btn palco-icon" style={S.clockBtn} onClick={() => { setRun(false); setSec(0); }} title="Zerar cronômetro"><RotateCcw size={13} strokeWidth={2.3} /></button>
-    </div>
-  );
-}
-
 /* ----------------------------- styles ----------------------------- */
 const S = {
   page: { minHeight: "100dvh", height: "100dvh", background: C.bg, color: C.text, fontFamily: FONT_UI, position: "relative", overflow: "hidden" },
@@ -1506,7 +1988,12 @@ const S = {
   libMsg: { padding: "11px 15px", background: "rgba(121,183,166,.10)", border: `1px solid rgba(121,183,166,.3)`, borderRadius: 11, color: C.teal, fontSize: 13.5, marginBottom: 18 },
   storageNote: { padding: "11px 15px", background: "rgba(224,104,60,.10)", border: `1px solid rgba(224,104,60,.3)`, borderRadius: 11, color: C.textDim, fontSize: 13, marginBottom: 18 },
   albumGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 16 },
-  albumCard: { textAlign: "left", display: "flex", flexDirection: "column", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 16, padding: "18px 18px 20px", cursor: "pointer" },
+  albumCard: { textAlign: "left", display: "flex", flexDirection: "column", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 16, padding: "14px 14px 18px", cursor: "pointer" },
+  albumCover: { position: "relative", width: "100%", aspectRatio: "1 / 1", borderRadius: 12, overflow: "hidden", marginBottom: 12, background: C.surface2, border: `1px solid ${C.border}` },
+  albumCoverImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
+  albumCoverEmpty: { width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: `linear-gradient(145deg, ${C.surface2}, ${C.bg})` },
+  albumCoverBtns: { position: "absolute", top: 8, right: 8, display: "flex", gap: 5 },
+  coverBtn: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(20,17,13,.72)", color: C.text, border: `1px solid ${C.borderSoft}`, borderRadius: 8, cursor: "pointer", backdropFilter: "blur(4px)" },
   albumTop: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, minHeight: 46 },
   albumIcon: { width: 46, height: 46, borderRadius: 12, background: C.surface2, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center" },
   albumTrash: { width: 32, height: 32, borderRadius: 9, background: "transparent", color: C.textFaint, border: `1px solid transparent`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
@@ -1557,6 +2044,8 @@ const S = {
   songSub: { fontSize: 11.5, color: C.textFaint },
   songChev: { color: C.textFaint, fontSize: 22, lineHeight: 1, transition: "all .15s ease" },
   starBtn: { width: 30, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", border: "none", borderRadius: 7, cursor: "pointer", flexShrink: 0 },
+  songActions: { display: "flex", alignItems: "center", gap: 1, flexShrink: 0 },
+  songActBtn: { width: 27, height: 30, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textFaint, border: "none", borderRadius: 7, cursor: "pointer", flexShrink: 0 },
   main: { flex: 1, display: "flex", flexDirection: "column", height: "100%", minWidth: 0, background: C.bg, borderLeft: `1px solid ${C.borderSoft}` },
   empty: { flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, textAlign: "center" },
   emptyIcon: { width: 64, height: 64, borderRadius: 18, background: C.surface, border: `1px solid ${C.borderSoft}`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 8 },
@@ -1571,7 +2060,7 @@ const S = {
   fontControls: { display: "flex", alignItems: "center", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: 4 },
   fontBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 30, height: 30, background: "transparent", color: C.textDim, border: "none", borderRadius: 7, cursor: "pointer" },
   fontVal: { fontFamily: FONT_MONO, fontSize: 12.5, color: C.textDim, width: 22, textAlign: "center" },
-  toolsBar: { display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: `1px solid ${C.borderSoft}`, flexShrink: 0, overflowX: "auto" },
+  toolsBar: { display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: `1px solid ${C.borderSoft}`, flexShrink: 0, flexWrap: "wrap", rowGap: 8 },
   toolGroup: { display: "flex", alignItems: "center", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "4px 6px 4px 10px", flexShrink: 0 },
   toolLabel: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.textFaint, fontWeight: 600, marginRight: 2 },
   toolBtn: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textDim, border: "none", borderRadius: 7, cursor: "pointer" },
@@ -1654,6 +2143,54 @@ const S = {
   // ----- Relógio de palco / aviso de capo -----
   stageBar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "8px 16px", borderBottom: `1px solid ${C.borderSoft}`, flexShrink: 0, flexWrap: "wrap" },
   clockBtn: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 8, cursor: "pointer", flexShrink: 0 },
+  stageClockFixed: { position: "fixed", top: "calc(env(safe-area-inset-top) + 6px)", left: "50%", transform: "translateX(-50%)", zIndex: 55, display: "flex", alignItems: "center", gap: 5, background: "rgba(20,17,13,.85)", border: `1px solid ${C.borderSoft}`, borderRadius: 99, padding: "4px 7px 4px 10px", backdropFilter: "blur(6px)", boxShadow: "0 4px 16px rgba(0,0,0,.45)" },
+  stageClockBtn: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textDim, border: "none", borderRadius: 6, cursor: "pointer", flexShrink: 0 },
+  sessionDot: { width: 8, height: 8, borderRadius: "50%", background: C.red, flexShrink: 0 },
+  sessionPillName: { fontSize: 12, fontWeight: 600, color: C.amber, maxWidth: 130, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  sessionCard: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 18, display: "flex", flexDirection: "column", gap: 10 },
+  sessionCardTop: { display: "flex", alignItems: "center", gap: 8 },
+  sessionCardTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15, color: C.text },
+  sessionRow: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
+  sessionLive: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 14, color: C.amber, fontWeight: 600, flex: 1, minWidth: 0 },
+  sessionHint: { fontSize: 12, color: C.textFaint, lineHeight: 1.5, margin: 0 },
+  sessionSecTitle: { display: "flex", alignItems: "center", gap: 8, fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16, color: C.text, marginTop: 24 },
+  rankRow: { display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderBottom: `1px solid ${C.borderSoft}` },
+  rankPos: { fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, width: 24, textAlign: "center", flexShrink: 0 },
+  rankTitle: { flex: 1, minWidth: 0, fontSize: 14.5, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  rankMeta: { fontFamily: FONT_MONO, fontSize: 12.5, color: C.amber, flexShrink: 0 },
+  sesCard: { background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 12, padding: "12px 14px" },
+  sesHead: { display: "flex", alignItems: "center", gap: 12 },
+  sesName: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 15, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  sesDate: { fontSize: 12, color: C.textFaint, marginTop: 2 },
+  sesDur: { marginLeft: "auto", fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, color: C.amber, flexShrink: 0 },
+  sesSetlist: { marginTop: 10, paddingTop: 10, borderTop: `1px solid ${C.borderSoft}`, display: "flex", flexDirection: "column", gap: 5 },
+  sesSong: { display: "flex", alignItems: "center", gap: 10, fontSize: 13.5 },
+  sesSongTitle: { flex: 1, minWidth: 0, color: C.textDim, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  sesSongTime: { fontFamily: FONT_MONO, fontSize: 12.5, color: C.textFaint, flexShrink: 0 },
+  // ----- Setlists -----
+  setlistHome: { marginBottom: 18 },
+  sectionHead: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10 },
+  setlistCardRow: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(180px, 1fr))", gap: 12 },
+  setlistHomeCard: { display: "flex", flexDirection: "column", gap: 4, background: C.surface, border: `1px solid rgba(240,168,51,.28)`, borderRadius: 14, padding: "14px 16px", cursor: "pointer" },
+  setlistHomeIcon: { width: 42, height: 42, borderRadius: 11, background: "rgba(240,168,51,.12)", border: `1px solid rgba(240,168,51,.35)`, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 8 },
+  setlistViewHead: { display: "flex", alignItems: "center", gap: 12, marginTop: 8 },
+  setlistPartHead: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 14, color: C.amber, letterSpacing: "0.04em", textTransform: "uppercase", padding: "6px 4px", borderBottom: `1px solid ${C.borderSoft}`, marginBottom: 6 },
+  setlistSong: { width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left", padding: "10px 12px", borderRadius: 10, cursor: "pointer", background: C.surface, border: `1px solid ${C.borderSoft}`, marginBottom: 6 },
+  setlistSongNum: { fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600, color: C.textFaint, width: 22, textAlign: "center", flexShrink: 0 },
+  setlistSongDur: { fontFamily: FONT_MONO, fontSize: 12, color: C.amber, flexShrink: 0 },
+  setlistInterval: { textAlign: "center", fontSize: 12, letterSpacing: "0.2em", textTransform: "uppercase", color: C.textFaint, margin: "16px 0" },
+  setlistEditSong: { display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", borderRadius: 10, background: C.surface, border: `1px solid ${C.borderSoft}`, marginBottom: 6 },
+  partTabs: { display: "flex", gap: 8, marginTop: 14 },
+  partTab: { flex: 1, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "10px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 14, cursor: "pointer", display: "flex", flexDirection: "column", gap: 2, alignItems: "center" },
+  partTabActive: { flex: 1, background: C.amber, color: "#1a140a", border: `1px solid ${C.amber}`, borderRadius: 10, padding: "10px 12px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 14, cursor: "pointer", display: "flex", flexDirection: "column", gap: 2, alignItems: "center" },
+  partTabMeta: { fontFamily: FONT_MONO, fontSize: 11, fontWeight: 600, opacity: 0.8 },
+  setlistTotal: { marginTop: 16, padding: "12px 15px", background: C.surface2, border: `1px solid ${C.border}`, borderRadius: 12, fontSize: 14, color: C.textDim, textAlign: "center" },
+  pickerCard: { width: "100%", maxWidth: 440, maxHeight: "82vh", display: "flex", flexDirection: "column", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 18, padding: 18, boxShadow: "0 24px 70px rgba(0,0,0,.6)" },
+  pickerList: { flex: 1, overflowY: "auto", minHeight: 0, display: "flex", flexDirection: "column", gap: 4 },
+  pickerRow: { width: "100%", display: "flex", alignItems: "center", gap: 10, textAlign: "left", padding: "10px 12px", borderRadius: 10, cursor: "pointer", background: "transparent", border: `1px solid ${C.borderSoft}` },
+  dragHandle: { width: 26, height: 32, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textFaint, border: "none", cursor: "grab", flexShrink: 0, touchAction: "none" },
+  checkOff: { width: 22, height: 22, borderRadius: 6, border: `1.5px solid ${C.border}`, background: "transparent", flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
+  checkOn: { width: 22, height: 22, borderRadius: 6, border: `1.5px solid ${C.amber}`, background: C.amber, flexShrink: 0, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", padding: 0 },
   capoBanner: { display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(240,168,51,.14)", color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 10, padding: "6px 13px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 13.5, letterSpacing: "0.05em", textTransform: "uppercase" },
   // ----- Modo GigHero (scaffold) -----
   gigPanel: { maxWidth: 720, margin: "0 auto", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 18, padding: "14px 18px", boxShadow: "0 12px 40px rgba(0,0,0,.45)", display: "flex", flexDirection: "column", gap: 12 },
