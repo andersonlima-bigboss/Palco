@@ -2,7 +2,8 @@ import React, { useState, useRef, useEffect, useMemo, useCallback } from "react"
 import {
   Play, Pause, ArrowLeft, ChevronLeft, Music2, ListMusic, Plus, Minus,
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
-  Download, Upload, Star, Search, Mic, X, Guitar,
+  Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
+  Clock, AlertTriangle, Pencil,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -21,6 +22,15 @@ const FONT_DISPLAY = "'Space Grotesk', 'Inter', system-ui, sans-serif";
 const FONT_MONO = "'JetBrains Mono', 'Courier New', ui-monospace, monospace";
 const STORAGE_KEY = "palco:library";
 const MONO_RATIO = 0.6;
+// velocidades de auto-rolagem (sempre avançam): lentas 0.1–0.5, depois normais
+const SPEEDS = [0.1, 0.2, 0.3, 0.4, 0.5, 1, 1.5, 2, 2.5];
+const DEFAULT_SPEED = 0.5;
+function snapSpeed(v) {
+  if (v == null) return DEFAULT_SPEED;
+  let best = SPEEDS[0], bd = Infinity;
+  for (const s of SPEEDS) { const d = Math.abs(s - v); if (d < bd) { bd = d; best = s; } }
+  return best;
+}
 
 /* ---------------------- armazenamento (Claude OU navegador) -------- */
 async function storageGet(key) {
@@ -56,7 +66,12 @@ function storageWorks() {
 function parseSongs(raw) {
   const text = (raw || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const tuningCount = (text.match(/^\s*tuning\s*:\s*eb/gim) || []).length;
-  const songs = tuningCount >= 2 ? parseUltimateGuitar(text) : parseSimple(text);
+  let songs;
+  if (tuningCount >= 2) songs = parseUltimateGuitar(text);
+  else {
+    const ugt = ugTitle(text);                 // página única do UG: usa nome + limpeza dedicada
+    songs = ugt ? [{ title: ugt, body: cleanUGSong(text) }] : parseSimple(text);
+  }
   return songs
     .map((s, idx) => ({
       title: (s.title || "").trim() || `Música ${idx + 1}`,
@@ -87,6 +102,37 @@ function ugClean(text) {
     lines = lines.slice(start);
   }
   return lines.filter((l) => { const t = l.trim(); if (UG_JUNK_EXACT.has(t.toLowerCase())) return false; if (UG_JUNK_RE.some((re) => re.test(t))) return false; return true; });
+}
+// Limpeza de UMA música colada do Ultimate-Guitar (cabeçalho + rodapé + lixo).
+const UG_FOOTER_RE = /^(last update\b|please,?\s*rate this tab|rating$|[\d.,]+\s*rates?$|welcome offer|play next$|more versions$|related tabs$|from collections$|theory and practice$|get effects$|all artists$|all collections$|©|all rights reserved|official version created)/i;
+function isTabLine(l) { return /^\s*[a-gA-G][b#]?\s*\|/.test(l) || /\|[-0-9hpb/\\~xX().\s]{4,}\|/.test(l); }
+// Extrai o nome da música do cabeçalho do UG (ex.: "Brother Chords by Alice In Chains" -> "Brother").
+function ugTitle(raw) {
+  const lines = (raw || "").replace(/\r\n/g, "\n").split("\n");
+  for (const l of lines.slice(0, 40)) {
+    const m = l.match(/^(.+?)\s+(?:Acoustic\s+|Live\s+|Electric\s+|Ukulele\s+|Solo\s+)?(?:Chords|Tabs?|Bass|Drums?|Lyrics|Pro)\s+by\s+\S/i);
+    if (m) { const t = normalizeTitle(m[1]); if (t && !/^(tabs?|chords?|courses?)$/i.test(t)) return t; }
+  }
+  return null;
+}
+function cleanUGSong(raw) {
+  let lines = (raw || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  // 1) corta o rodapé no primeiro marcador conhecido
+  const fi = lines.findIndex((l) => UG_FOOTER_RE.test(l.trim()));
+  if (fi !== -1) lines = lines.slice(0, fi);
+  // 2) acha o início da cifra (1ª seção / acorde / tablatura)
+  const start = lines.findIndex((l) => { const t = l.trim(); return t !== "" && (isSectionLine(t) || isChordLine(t) || isTabLine(l)); });
+  let header = [];
+  if (start > 0) {
+    // do cabeçalho, mantém SÓ as linhas de Tuning e Speed; descarta o resto
+    header = lines.slice(0, start).filter((l) => /^\s*(tuning|speed)\b/i.test(l.trim()));
+    lines = lines.slice(start);
+  }
+  // 3) remove linhas de lixo soltas do corpo
+  lines = lines.filter((l) => { const t = l.trim(); if (!t) return true; if (UG_JUNK_EXACT.has(t.toLowerCase())) return false; if (UG_JUNK_RE.some((re) => re.test(t))) return false; return true; });
+  // 4) junta cabeçalho (Tuning/Speed) + cifra e normaliza brancos
+  const out = [...header, ...(header.length ? [""] : []), ...lines];
+  return out.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "").replace(/\n+$/, "");
 }
 function ugDetectTitle(lines, tuningIdx) {
   let j = tuningIdx - 1;
@@ -136,7 +182,7 @@ function parseSimple(text) {
 /* ------------------------ classificação de linhas ----------------- */
 const QUALITIES = ["maj7","maj9","maj","min","dim7","dim","aug","sus2","sus4","sus","add9","add11","add","7M","13","11","9","7","6","5","4","2","m","M","°","º","\\+"].join("|");
 const CHORD_RE = new RegExp(`^\\(?[A-G][#b]?(?:${QUALITIES})*(?:\\([#b]?\\d+\\))?(?:\\/[A-G][#b]?)?\\)?$`);
-const STRUCT_RE = /^(\||x\d+|%|\(\d+x?\)|N\.?C\.?|–|-|:)$/i;
+const STRUCT_RE = /^(\||x\d+|%|\(\d+x?\)|N\.?C\.?|–|-|:|\.{2,}|…)$/i;
 function isChordLine(line) {
   const t = line.trim(); if (!t) return false;
   const tokens = t.split(/\s+/); let hits = 0, real = 0;
@@ -293,6 +339,30 @@ function gradeFor(pct) {
   return { letter: "D", label: "Bora ensaiar mais um pouco", color: "#E0683C" };
 }
 
+/* ---------------------- modo karaokê (helpers) -------------------- */
+function fmtMMSS(s) {
+  s = Math.max(0, Math.floor(s || 0));
+  return Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
+}
+function ytId(url) {
+  const m = String(url || "").match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([A-Za-z0-9_-]{11})/);
+  if (m) return m[1];
+  const t = String(url || "").trim();
+  return /^[A-Za-z0-9_-]{11}$/.test(t) ? t : null;
+}
+function loadYTApi() {
+  return new Promise((resolve) => {
+    if (window.YT && window.YT.Player) return resolve(window.YT);
+    const prev = window.onYouTubeIframeAPIReady;
+    window.onYouTubeIframeAPIReady = () => { if (typeof prev === "function") prev(); resolve(window.YT); };
+    if (!document.getElementById("yt-iframe-api")) {
+      const s = document.createElement("script");
+      s.id = "yt-iframe-api"; s.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(s);
+    }
+  });
+}
+
 /* ----------------------------- sample ----------------------------- */
 const SAMPLE = `Título: Boas-vindas (Demo)
 [Intro] C  G  Am  F
@@ -370,7 +440,14 @@ const CSS = `
 .palco-ev-active{text-decoration:underline;text-underline-offset:4px;}
 .palco-ev-hit{background:rgba(123,196,127,.20);}
 .palco-ev-miss{background:rgba(224,104,60,.20);}
-@media (prefers-reduced-motion: reduce){.palco-btn,.palco-chev,.palco-ev{transition:none!important;}}
+.palco-primary:hover{box-shadow:0 0 22px rgba(240,168,51,.5);}
+.palco-chip:hover{box-shadow:0 0 16px rgba(240,168,51,.3);}
+.palco-album:hover{box-shadow:0 0 26px rgba(240,168,51,.14);}
+.neon{box-shadow:0 0 18px rgba(240,168,51,.5);}
+.neon-text{text-shadow:0 0 12px rgba(240,168,51,.55);}
+@keyframes neonPulse{0%,100%{box-shadow:0 0 14px rgba(240,168,51,.45);}50%{box-shadow:0 0 26px rgba(240,168,51,.75);}}
+.neon-pulse{animation:neonPulse 1.8s ease-in-out infinite;}
+@media (prefers-reduced-motion: reduce){.palco-btn,.palco-chev,.palco-ev,.neon-pulse{transition:none!important;animation:none!important;}}
 `;
 
 /* ============================== APP =============================== */
@@ -392,7 +469,7 @@ export default function Palco() {
   const [query, setQuery] = useState("");
 
   const [playing, setPlaying] = useState(false);
-  const [speed, setSpeed] = useState(4);
+  const [speed, setSpeed] = useState(DEFAULT_SPEED);
   const [fontSize, setFontSize] = useState(18);
   const [autoFit, setAutoFit] = useState(true);
   const [containerW, setContainerW] = useState(0);
@@ -403,22 +480,25 @@ export default function Palco() {
   const [popover, setPopover] = useState(null); // {name, left, top, place}
   const [tunerOpen, setTunerOpen] = useState(false);
 
-  // ----- Modo Jogo -----
-  const [mode, setMode] = useState("free");                       // "free" | "game"
-  const [game, setGame] = useState({ phase: "idle" });            // idle | countdown | playing | finished | denied | unsupported
-  const [gScore, setGScore] = useState({ hits: 0, total: 0, status: [] });
-  const [gActive, setGActive] = useState(-1);
-  const [gFlash, setGFlash] = useState(null);                     // {idx, kind: "hit"|"miss"}
+  // ----- Modo Karaokê (a cifra segue o tempo do áudio) -----
+  const [mode, setMode] = useState("free");                       // "free" | "karaoke"
+  const [kar, setKar] = useState({ src: "none", url: "", fileName: "", ready: false, playing: false, dur: 0, time: 0 });
+  const [karMuted, setKarMuted] = useState(false);
+  const [karVol, setKarVol] = useState(0.85);
+  const [karError, setKarError] = useState("");
+  const [songImportRaw, setSongImportRaw] = useState("");          // texto colado p/ importar numa faixa do esqueleto
+  const [rename, setRename] = useState(null);                      // { kind:"song"|"album", albumId, idx?, value } | null
 
   const scrollRef = useRef(null), rafRef = useRef(null), accRef = useRef(0), fileInputRef = useRef(null);
-  const gAudioRef = useRef(null);     // {ctx, stream, analyser, buf}
-  const gRafRef = useRef(null);       // requestAnimationFrame do jogo
-  const gClockRef = useRef({ t0: 0 }); // relógio (segundos)
-  const gRunRef = useRef(0);          // token p/ invalidar loops antigos
-  const chartRef = useRef([]);        // snapshot da timeline em jogo
-  const targetRef = useRef(0);        // índice do próximo acorde a resolver
-  const eventEls = useRef([]);        // refs DOM dos acordes-alvo (p/ medir Y)
-  const eventY = useRef([]);          // posição Y medida de cada alvo
+  const audioFileRef = useRef(null);  // <input type=file> do áudio local
+  const audioElRef = useRef(null);    // <audio> do arquivo local
+  const ytRef = useRef(null);         // player do YouTube
+  const ytDivRef = useRef(null);      // div onde o YouTube monta o iframe
+  const ytInputRef = useRef(null);    // <input> do link do YouTube
+  const karRafRef = useRef(null);     // requestAnimationFrame da sincronização
+  const karObjUrl = useRef(null);     // objectURL do arquivo (p/ revogar)
+  const lineEls = useRef({});         // refs DOM das linhas (p/ medir Y no karaokê)
+  const lineYRef = useRef(null);      // Y medido de cada linha sincronizada
 
   useEffect(() => {
     const link = document.createElement("link");
@@ -454,12 +534,12 @@ export default function Palco() {
       for (const key of library.favorites || []) {
         const [aid, i] = [key.slice(0, key.lastIndexOf(":")), Number(key.slice(key.lastIndexOf(":") + 1))];
         const al = library.albums.find((a) => a.id === aid);
-        if (al && al.songs[i]) out.push({ albumId: aid, idx: i, title: al.songs[i].title, body: al.songs[i].body });
+        if (al && al.songs[i]) out.push({ albumId: aid, idx: i, title: al.songs[i].title, body: al.songs[i].body, sync: al.songs[i].sync || null, link: al.songs[i].link || "" });
       }
       return out;
     }
     const al = library.albums.find((a) => a.id === currentAlbumId);
-    return al ? al.songs.map((s, i) => ({ albumId: al.id, idx: i, title: s.title, body: s.body })) : [];
+    return al ? al.songs.map((s, i) => ({ albumId: al.id, idx: i, title: s.title, body: s.body, sync: s.sync || null, link: s.link || "" })) : [];
   }, [library, currentAlbumId]);
 
   const currentAlbumName = currentAlbumId === "__fav__" ? "Favoritos" : (library.albums.find((a) => a.id === currentAlbumId) || {}).name || "";
@@ -473,7 +553,7 @@ export default function Palco() {
     const st = (library.settings && library.settings[selKey]) || {};
     setTranspose(st.transpose || 0);
     setCapo(st.capo || 0);
-    setSpeed(st.speed || 4);
+    setSpeed(snapSpeed(st.speed));
     setPlaying(false); accRef.current = 0; setPopover(null);
     if (scrollRef.current) scrollRef.current.scrollTop = 0;
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -484,7 +564,7 @@ export default function Palco() {
     if (!selKey) return;
     const settings = { ...(library.settings || {}) };
     const merged = { ...(settings[selKey] || {}), ...patch };
-    if (!merged.transpose && !merged.capo && (merged.speed === 4 || merged.speed == null)) delete settings[selKey];
+    if (!merged.transpose && !merged.capo && (merged.speed === DEFAULT_SPEED || merged.speed == null)) delete settings[selKey];
     else settings[selKey] = merged;
     commit({ ...library, settings });
   };
@@ -503,9 +583,17 @@ export default function Palco() {
     });
   }, [selectedSong]);
 
-  // timeline do jogo (acordes com tempo), já com transpose/capo aplicados
-  const chart = useMemo(() => (selectedSong ? buildChart(selectedSong.body, displayShift) : []), [selectedSong, displayShift]);
-  const hasChart = chart.length > 0;
+  // sincronização karaokê (tempos de palavra/linha) da música selecionada
+  const karSync = useMemo(() => {
+    const s = selectedSong && selectedSong.sync;
+    if (!s || !Array.isArray(s.words) || !s.words.length) return null;
+    const wordsByLine = {};
+    for (const w of s.words) { (wordsByLine[w.li] = wordsByLine[w.li] || []).push(w); }
+    Object.values(wordsByLine).forEach((arr) => arr.sort((a, b) => a.wi - b.wi));
+    const anchors = (s.lines || []).slice().sort((a, b) => a.t0 - b.t0);
+    const flat = s.words.slice().sort((a, b) => a.t - b.t);
+    return { wordsByLine, anchors, flat };
+  }, [selectedSong]);
 
   const maxChars = useMemo(() => {
     if (!selectedSong) return 0;
@@ -533,7 +621,7 @@ export default function Palco() {
     let last = performance.now();
     const step = (now) => {
       const dt = now - last; last = now;
-      accRef.current += ((8 + speed * 12) * dt) / 1000;
+      accRef.current += (speed * 28 * dt) / 1000;
       if (accRef.current >= 1) { const inc = Math.floor(accRef.current); el.scrollTop += inc; accRef.current -= inc; }
       if (el.scrollTop + el.clientHeight >= el.scrollHeight - 1) { setPlaying(false); return; }
       rafRef.current = requestAnimationFrame(step);
@@ -632,129 +720,186 @@ export default function Palco() {
     return out.slice(0, 60);
   }, [query, library]);
 
-  /* ===================== Modo Jogo: controle ===================== */
-  const stopGameAudio = () => {
-    if (gRafRef.current) { cancelAnimationFrame(gRafRef.current); gRafRef.current = null; }
-    const a = gAudioRef.current;
-    if (a) {
-      try { a.stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
-      try { if (a.ctx.state !== "closed") a.ctx.close(); } catch (e) {}
-    }
-    gAudioRef.current = null;
+  /* ===================== Modo Karaokê: controle ===================== */
+  const stopKar = () => {
+    if (karRafRef.current) { cancelAnimationFrame(karRafRef.current); karRafRef.current = null; }
+    try { if (audioElRef.current) audioElRef.current.pause(); } catch (e) {}
+    try { if (ytRef.current && ytRef.current.pauseVideo) ytRef.current.pauseVideo(); } catch (e) {}
   };
-  const stopGame = () => { gRunRef.current++; stopGameAudio(); setGame({ phase: "idle" }); setGActive(-1); setGFlash(null); targetRef.current = 0; };
+  const teardownKar = () => {
+    stopKar();
+    try { if (ytRef.current && ytRef.current.destroy) ytRef.current.destroy(); } catch (e) {}
+    ytRef.current = null;
+    try { if (ytDivRef.current) ytDivRef.current.innerHTML = ""; } catch (e) {}
+    try { if (audioElRef.current) { audioElRef.current.removeAttribute("src"); audioElRef.current.load(); } } catch (e) {}
+    if (karObjUrl.current) { try { URL.revokeObjectURL(karObjUrl.current); } catch (e) {} karObjUrl.current = null; }
+  };
   const switchMode = (m) => {
     if (m === mode) return;
-    gRunRef.current++; stopGameAudio(); setTunerOpen(false); setPlaying(false);
-    setGame({ phase: "idle" }); setGActive(-1); setGFlash(null); targetRef.current = 0;
+    setTunerOpen(false); setPlaying(false); stopKar();
     setMode(m);
   };
 
-  // mede a posição vertical (Y) de cada acorde-alvo dentro da área de rolagem
-  const measureEvents = () => {
-    const el = scrollRef.current; if (!el) return;
-    el.scrollTop = 0;
-    const cTop = el.getBoundingClientRect().top;
-    eventY.current = chartRef.current.map((_, i) => {
-      const node = eventEls.current[i];
-      return node ? node.getBoundingClientRect().top - cTop : 0;
-    });
+  // "relógio" da fonte ativa (YouTube tem prioridade se existir)
+  const karClock = () => {
+    const yt = ytRef.current;
+    if (yt && yt.getCurrentTime) { try { return { t: yt.getCurrentTime(), dur: yt.getDuration() || 0 }; } catch (e) { return { t: 0, dur: 0 }; } }
+    const a = audioElRef.current;
+    if (a && a.duration) return { t: a.currentTime, dur: a.duration };
+    return { t: 0, dur: 0 };
   };
-
-  const markResult = (idx, hit) => {
-    setGScore((s) => { const status = s.status.slice(); status[idx] = hit ? "hit" : "miss"; return { ...s, hits: s.hits + (hit ? 1 : 0), status }; });
-    setGFlash({ idx, kind: hit ? "hit" : "miss" });
-    setTimeout(() => setGFlash((f) => (f && f.idx === idx ? null : f)), 350);
+  // mede a posição Y de cada linha sincronizada (p/ rolagem que segue as linhas)
+  const measureKarLines = () => {
+    const el = scrollRef.current; if (!el || !karSync) return;
+    const cTop = el.getBoundingClientRect().top, base = el.scrollTop;
+    const ys = {};
+    for (const a of karSync.anchors) {
+      const node = lineEls.current[a.li];
+      if (node) ys[a.li] = node.getBoundingClientRect().top - cTop + base;
+    }
+    lineYRef.current = ys;
   };
-
-  const finishGame = (myRun) => {
-    if (myRun !== gRunRef.current) return;
-    gRunRef.current++; stopGameAudio(); setGame({ phase: "finished" });
-  };
-
-  // loop principal do jogo: scroll por tempo + detecção de pitch + colisão
-  const runGameFrame = (myRun) => {
-    const el = scrollRef.current, audio = gAudioRef.current, cs = chartRef.current;
-    let lastDetect = 0;
-    const frame = () => {
-      if (myRun !== gRunRef.current) return;
-      const now = performance.now() / 1000;
-      const t = now - gClockRef.current.t0;
-      // --- rolagem sincronizada rigidamente ao cronômetro (segundos) ---
-      if (el && eventY.current.length) {
-        const H = el.clientHeight * 0.38, ys = eventY.current; let y;
-        if (t <= cs[0].t) y = ys[0];
-        else if (t >= cs[cs.length - 1].t) y = ys[ys.length - 1];
-        else {
-          let k = 0; while (k < cs.length - 1 && cs[k + 1].t <= t) k++;
-          const span = (cs[k + 1].t - cs[k].t) || 1;
-          const p = Math.max(0, Math.min(1, (t - cs[k].t) / span));
-          y = ys[k] + (ys[k + 1] - ys[k]) * p;
+  // sincroniza a rolagem da cifra ao tempo da música
+  const startKarLoop = () => {
+    cancelAnimationFrame(karRafRef.current);
+    if (karSync) requestAnimationFrame(() => measureKarLines());
+    let lastUI = -1;
+    const loop = () => {
+      const { t, dur } = karClock();
+      const el = scrollRef.current;
+      if (el) {
+        const max = el.scrollHeight - el.clientHeight;
+        if (max > 0) {
+          let target = null;
+          const ys = lineYRef.current, an = karSync && karSync.anchors;
+          if (an && an.length && ys) {
+            const H = el.clientHeight * 0.40;
+            if (t <= an[0].t0) target = (ys[an[0].li] || 0) - H;
+            else if (t >= an[an.length - 1].t0) target = (ys[an[an.length - 1].li] || 0) - H;
+            else {
+              let k = 0; while (k < an.length - 1 && an[k + 1].t0 <= t) k++;
+              const y0 = ys[an[k].li] || 0, y1 = ys[an[k + 1].li] != null ? ys[an[k + 1].li] : y0;
+              const span = (an[k + 1].t0 - an[k].t0) || 1;
+              const p = Math.max(0, Math.min(1, (t - an[k].t0) / span));
+              target = y0 + (y1 - y0) * p - H;
+            }
+          } else if (dur > 0) {
+            target = (t / dur) * max;
+          }
+          if (target != null) el.scrollTop = Math.max(0, Math.min(max, target));
         }
-        el.scrollTop = Math.max(0, y - H);
       }
-      // --- detecção da frequência do microfone (reusa o afinador) ---
-      let pc = null;
-      if (audio && (now - lastDetect) > 0.07) {
-        lastDetect = now;
-        audio.analyser.getFloatTimeDomainData(audio.buf);
-        const freq = autoCorrelate(audio.buf, audio.ctx.sampleRate);
-        if (freq > 0) { const nn = freqToNote(freq); pc = NOTE_TO_I[nn.name]; }
-      }
-      // --- colisão de tempo: acerto / perda do acorde atual ---
-      const ti = targetRef.current;
-      if (ti < cs.length) {
-        const ev = cs[ti];
-        if (t > ev.t + HIT_POST) { markResult(ti, false); targetRef.current = ti + 1; setGActive(targetRef.current); }
-        else if (t >= ev.t - HIT_PRE && pc != null && pc === ev.pc) { markResult(ti, true); targetRef.current = ti + 1; setGActive(targetRef.current); }
-      }
-      if (targetRef.current >= cs.length) { finishGame(myRun); return; }
-      gRafRef.current = requestAnimationFrame(frame);
+      if (Math.abs(t - lastUI) >= 0.08) { lastUI = t; setKar((k) => ({ ...k, time: t, dur: dur || k.dur })); }
+      karRafRef.current = requestAnimationFrame(loop);
     };
-    gRafRef.current = requestAnimationFrame(frame);
+    karRafRef.current = requestAnimationFrame(loop);
+  };
+  const karApplyAudio = () => {
+    try { if (audioElRef.current) { audioElRef.current.muted = karMuted; audioElRef.current.volume = karVol; } } catch (e) {}
+    try { if (ytRef.current && ytRef.current.setVolume) { karMuted ? ytRef.current.mute() : ytRef.current.unMute(); ytRef.current.setVolume(Math.round(karVol * 100)); } } catch (e) {}
   };
 
-  const startClockAndLoop = (myRun) => {
-    if (myRun !== gRunRef.current) return;
-    gClockRef.current = { t0: performance.now() / 1000 };
-    setGame({ phase: "playing" });
-    runGameFrame(myRun);
-  };
-  const beginCountdown = (myRun) => {
-    let n = 3; setGame({ phase: "countdown", n });
-    const tick = () => {
-      if (myRun !== gRunRef.current) return;
-      n -= 1;
-      if (n <= 0) startClockAndLoop(myRun);
-      else { setGame({ phase: "countdown", n }); setTimeout(tick, 800); }
-    };
-    setTimeout(tick, 800);
+  // ---- fonte: arquivo local ----
+  const pickAudioFile = () => audioFileRef.current && audioFileRef.current.click();
+  const onAudioFileChange = (e) => {
+    const file = e.target.files && e.target.files[0]; if (!file) return;
+    teardownKar(); setKarError("");
+    const url = URL.createObjectURL(file); karObjUrl.current = url;
+    setKar((k) => ({ ...k, src: "file", url: "", fileName: file.name, ready: false, playing: false, dur: 0, time: 0 }));
+    requestAnimationFrame(() => { const a = audioElRef.current; if (a) { a.src = url; a.muted = karMuted; a.volume = karVol; a.load(); } });
+    if (audioFileRef.current) audioFileRef.current.value = "";
   };
 
-  const startGame = async () => {
-    if (!chart.length) return;
-    gRunRef.current++; const myRun = gRunRef.current;
-    stopGameAudio(); setTunerOpen(false); setPlaying(false);
-    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setGame({ phase: "unsupported" }); return; }
+  // ---- fonte: YouTube ----
+  const persistYoutube = (url) => {
+    if (!selKey) return;
+    const settings = { ...(library.settings || {}) };
+    settings[selKey] = { ...(settings[selKey] || {}), youtube: url };
+    commit({ ...library, settings });
+  };
+  const loadYoutube = async (rawUrl) => {
+    const id = ytId(rawUrl);
+    if (!id) { setKarError("Link do YouTube inválido. Cole a URL completa do vídeo."); return; }
+    teardownKar(); setKarError("");
+    setKar((k) => ({ ...k, src: "youtube", url: rawUrl, fileName: "", ready: false, playing: false, dur: 0, time: 0 }));
+    persistYoutube(rawUrl);
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
-      const ctx = new (window.AudioContext || window.webkitAudioContext)();
-      const src = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser(); analyser.fftSize = 2048; src.connect(analyser);
-      gAudioRef.current = { ctx, stream, analyser, buf: new Float32Array(analyser.fftSize) };
-    } catch (e) { setGame({ phase: "denied" }); return; }
-    if (myRun !== gRunRef.current) { stopGameAudio(); return; }
-    chartRef.current = chart; targetRef.current = 0;
-    setGScore({ hits: 0, total: chart.length, status: new Array(chart.length).fill(null) });
-    setGActive(0); setGFlash(null);
-    requestAnimationFrame(() => { if (myRun !== gRunRef.current) return; measureEvents(); beginCountdown(myRun); });
+      const YT = await loadYTApi();
+      requestAnimationFrame(() => {
+        if (!ytDivRef.current) return;
+        ytDivRef.current.innerHTML = "";
+        const host = document.createElement("div");
+        host.style.width = "100%"; host.style.height = "100%";
+        ytDivRef.current.appendChild(host);
+        ytRef.current = new YT.Player(host, {
+          videoId: id, width: "100%", height: "100%",
+          playerVars: { rel: 0, playsinline: 1, modestbranding: 1 },
+          events: {
+            onReady: (ev) => { try { karMuted ? ev.target.mute() : ev.target.unMute(); ev.target.setVolume(Math.round(karVol * 100)); } catch (e) {} setKar((k) => ({ ...k, ready: true, dur: ev.target.getDuration() || 0 })); },
+            onStateChange: (ev) => {
+              if (ev.data === 1) { setKar((k) => ({ ...k, playing: true })); startKarLoop(); }
+              else if (ev.data === 2 || ev.data === 0) { setKar((k) => ({ ...k, playing: false })); if (ev.data === 0) cancelAnimationFrame(karRafRef.current); }
+            },
+          },
+        });
+      });
+    } catch (e) { setKarError("Não consegui carregar o player do YouTube (precisa de internet)."); }
   };
 
+  // ---- transporte do karaokê ----
+  const karToggle = () => {
+    if (ytRef.current && ytRef.current.playVideo) { kar.playing ? ytRef.current.pauseVideo() : ytRef.current.playVideo(); return; }
+    const a = audioElRef.current; if (!a) return;
+    if (a.paused) a.play().catch(() => {}); else a.pause();
+  };
+  const karSeek = (frac) => {
+    const { dur } = karClock(); const d = dur || kar.dur || 0; const target = frac * d;
+    if (ytRef.current && ytRef.current.seekTo) ytRef.current.seekTo(target, true);
+    else if (audioElRef.current) audioElRef.current.currentTime = target;
+    const el = scrollRef.current;
+    if (el) { const max = el.scrollHeight - el.clientHeight; if (max > 0) el.scrollTop = Math.max(0, Math.min(max, frac * max)); }
+    setKar((k) => ({ ...k, time: target }));
+  };
+  const changeKarSource = () => { teardownKar(); setKar((k) => ({ ...k, src: "none", ready: false, playing: false, time: 0, dur: 0 })); };
+
+  // ---- editar/renomear (música ou álbum) / importar cifra ----
+  const patchSong = (albumId, idx, patch) => {
+    commit({ ...library, albums: library.albums.map((a) => a.id === albumId ? { ...a, songs: a.songs.map((s, i) => i === idx ? { ...s, ...patch } : s) } : a) });
+  };
+  const patchAlbum = (albumId, patch) => {
+    commit({ ...library, albums: library.albums.map((a) => a.id === albumId ? { ...a, ...patch } : a) });
+  };
+  const commitRename = () => {
+    if (!rename) return;
+    const name = (rename.value || "").trim();
+    if (!name) { setRename(null); return; }
+    if (rename.kind === "album") patchAlbum(rename.albumId, { name });
+    else patchSong(rename.albumId, rename.idx, { title: name });
+    setRename(null);
+  };
+  const importIntoSong = () => {
+    if (!selectedSong || !songImportRaw.trim()) return;
+    const raw = songImportRaw.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+    const multi = (raw.match(/^\s*tuning\s*:\s*eb/gim) || []).length >= 2;
+    let body;
+    if (multi) body = parseSongs(raw).map((p) => p.body).filter(Boolean).join("\n\n");
+    else body = cleanUGSong(raw);
+    if (!body.trim()) body = raw.trim();
+    const patch = { body };
+    const t = ugTitle(raw);                    // auto-renomeia com o nome real da música (se detectado)
+    if (t) patch.title = t;
+    patchSong(selectedSong.albumId, selectedSong.idx, patch);
+    setSongImportRaw("");
+  };
+
+  // aplica volume/mudo quando mudam
+  useEffect(() => { karApplyAudio(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [karMuted, karVol]);
   // limpeza ao desmontar e ao trocar de música (não interfere no Modo Livre)
-  useEffect(() => () => { gRunRef.current++; stopGameAudio(); }, []);
+  useEffect(() => () => teardownKar(), []);
   useEffect(() => {
-    gRunRef.current++; stopGameAudio();
-    setMode("free"); setGame({ phase: "idle" }); setGActive(-1); setGFlash(null); targetRef.current = 0;
+    teardownKar(); setMode("free"); setKarError(""); setSongImportRaw("");
+    const saved = (library.settings && library.settings[selKey] && library.settings[selKey].youtube) || "";
+    setKar({ src: "none", url: saved, fileName: "", ready: false, playing: false, dur: 0, time: 0 });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selKey]);
 
@@ -768,6 +913,20 @@ export default function Palco() {
       </div>
     );
   }
+
+  // modal de renomear (música ou álbum) — usado em mais de uma tela
+  const renameModal = rename != null ? (
+    <div style={S.tunerOverlay} onClick={() => setRename(null)}>
+      <div style={S.renameCard} onClick={(e) => e.stopPropagation()}>
+        <div style={S.tunerHead}><span style={S.tunerTitle}>{rename.kind === "album" ? "Renomear álbum" : "Renomear música"}</span><button className="palco-btn palco-icon" style={S.popClose} onClick={() => setRename(null)}><X size={16} strokeWidth={2.3} /></button></div>
+        <input className="palco-input" style={{ ...S.input, marginTop: 10 }} value={rename.value} autoFocus onChange={(e) => setRename((r) => ({ ...r, value: e.target.value }))} onKeyDown={(e) => { if (e.key === "Enter") commitRename(); if (e.key === "Escape") setRename(null); }} />
+        <div style={{ display: "flex", gap: 10, marginTop: 14, justifyContent: "flex-end" }}>
+          <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={() => setRename(null)}>Cancelar</button>
+          <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={commitRename}>Salvar</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
 
   /* ----------------------------- ALBUMS ---------------------------- */
   if (view === "albums") {
@@ -836,7 +995,10 @@ export default function Palco() {
                         <button className="palco-btn" style={S.confirmNo} onClick={() => setPendingDelete(null)}><Minus size={14} strokeWidth={2.6} /></button>
                       </div>
                     ) : (
-                      <button className="palco-btn palco-trash" style={S.albumTrash} onClick={(e) => { e.stopPropagation(); setPendingDelete(a.id); }} title="Apagar álbum"><Trash2 size={15} strokeWidth={2} /></button>
+                      <div style={{ display: "flex", gap: 6 }} onClick={(e) => e.stopPropagation()}>
+                        <button className="palco-btn palco-icon" style={S.albumTrash} onClick={(e) => { e.stopPropagation(); setRename({ kind: "album", albumId: a.id, value: a.name }); }} title="Renomear álbum"><Pencil size={14} strokeWidth={2.1} /></button>
+                        <button className="palco-btn palco-trash" style={S.albumTrash} onClick={(e) => { e.stopPropagation(); setPendingDelete(a.id); }} title="Apagar álbum"><Trash2 size={15} strokeWidth={2} /></button>
+                      </div>
                     )}
                   </div>
                   <div style={S.albumName}>{a.name}</div>
@@ -846,6 +1008,7 @@ export default function Palco() {
             </div>
           )}
         </div>
+        {renameModal}
       </div>
     );
   }
@@ -897,6 +1060,7 @@ export default function Palco() {
   const showSidebar = !isMobile || selected === null;
   const showMain = !isMobile || selected !== null;
   const isFav = selectedSong ? favSet.has(favKey(selectedSong.albumId, selectedSong.idx)) : false;
+  const needsImport = !!selectedSong && !String(selectedSong.body || "").trim();
 
   return (
     <div className="palco-root" style={S.page}>
@@ -935,6 +1099,7 @@ export default function Palco() {
                 <header style={S.viewerHead}>
                   <button className="palco-btn palco-icon" style={S.backBtn} onClick={isMobile ? backToSongs : resetScroll} title={isMobile ? "Voltar à lista" : "Voltar ao topo"}><ArrowLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 7 }}>{isMobile ? "Lista" : "Topo"}</span></button>
                   <h1 style={S.viewerTitle}>{selectedSong.title}</h1>
+                  <button className="palco-btn palco-icon" style={S.headStar} onClick={() => setRename({ kind: "song", albumId: selectedSong.albumId, idx: selectedSong.idx, value: selectedSong.title })} title="Renomear música"><Pencil size={16} strokeWidth={2.1} /></button>
                   <button className="palco-btn palco-star" style={{ ...S.headStar, color: isFav ? C.amber : C.textDim }} onClick={() => toggleFav(selectedSong.albumId, selectedSong.idx)} title={isFav ? "Remover dos favoritos" : "Favoritar"}><Star size={18} fill={isFav ? C.amber : "none"} strokeWidth={2} /></button>
                   <div style={S.headControls}>
                     <button className="palco-btn" style={{ ...S.autoBtn, background: autoFit ? C.amber : C.surface, color: autoFit ? "#1a140a" : C.textDim, borderColor: autoFit ? C.amber : C.borderSoft }} onClick={() => setAutoFit((v) => !v)} title="Ajustar fonte à largura"><Maximize2 size={14} strokeWidth={2.4} /><span style={{ marginLeft: 6, fontWeight: 600, fontSize: 12.5 }}>Ajustar</span></button>
@@ -942,11 +1107,21 @@ export default function Palco() {
                   </div>
                 </header>
 
+                {needsImport ? (
+                  <div className="palco-scroll" style={S.importPane}>
+                    <p style={S.importPaneTitle}>Cifra ainda não importada</p>
+                    {selectedSong.link && <a href={selectedSong.link} target="_blank" rel="noreferrer" style={S.ugLink}><FileText size={15} strokeWidth={2.1} /> Abrir no Ultimate-Guitar</a>}
+                    <p style={S.importPaneHint}>Abra o link, selecione e copie a cifra (Ctrl+A, Ctrl+C) e cole abaixo. O Palco limpa o texto do Ultimate-Guitar automaticamente.</p>
+                    <textarea className="palco-textarea" value={songImportRaw} onChange={(e) => setSongImportRaw(e.target.value)} placeholder={"Cole aqui a cifra copiada do Ultimate-Guitar…"} style={S.importPaneArea} spellCheck={false} />
+                    <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, alignSelf: "flex-start", opacity: songImportRaw.trim() ? 1 : 0.45, cursor: songImportRaw.trim() ? "pointer" : "not-allowed" }} onClick={importIntoSong} disabled={!songImportRaw.trim()}><Check size={17} strokeWidth={2.4} /> Importar nesta música</button>
+                  </div>
+                ) : (<>
                 {/* barra de ferramentas: transpor / capo / afinador */}
                 <div className="palco-scroll" style={S.toolsBar}>
                   <div style={S.modeSeg}>
-                    <button className="palco-btn" style={mode === "free" ? S.segActive : S.seg} onClick={() => switchMode("free")}>Livre</button>
-                    <button className="palco-btn" style={mode === "game" ? S.segActive : S.seg} onClick={() => switchMode("game")}>Jogo</button>
+                    <button className="palco-btn" style={mode === "free" ? S.segActive : S.seg} onClick={() => switchMode("free")}>Palco</button>
+                    <button className="palco-btn" style={mode === "karaoke" ? S.segActive : S.seg} onClick={() => switchMode("karaoke")}>Karaokê</button>
+                    <button className="palco-btn" style={mode === "gighero" ? S.segActive : S.seg} onClick={() => switchMode("gighero")}>GigHero</button>
                   </div>
                   <div style={S.toolGroup}>
                     <span style={S.toolLabel}>Tom</span>
@@ -962,31 +1137,35 @@ export default function Palco() {
                   </div>
                   {(transpose !== 0 || capo !== 0) && <button className="palco-btn palco-icon" style={S.toolReset} onClick={resetToneCapo} title="Zerar tom e capo"><RotateCcw size={13} strokeWidth={2.3} /></button>}
                   {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerBtn} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={15} strokeWidth={2.1} /> Afinar</button>}
+                  {selectedSong.link && <a href={selectedSong.link} target="_blank" rel="noreferrer" style={{ ...S.ugTool, marginLeft: mode === "free" ? 0 : "auto" }} title="Abrir cifra no Ultimate-Guitar"><FileText size={14} strokeWidth={2.1} /></a>}
+                </div>
+
+                <div style={S.stageBar}>
+                  <StageClock />
+                  {capo > 0 && <div className="neon-pulse" style={S.capoBanner}><AlertTriangle size={15} strokeWidth={2.6} /> CAPO NA {capo}ª CASA</div>}
                 </div>
 
                 <div style={S.cifraWrap}>
                   <div ref={scrollRef} className="palco-scroll" style={S.cifraScroll} onScroll={() => popover && setPopover(null)}>
                     <div style={{ ...S.cifra, fontSize: effFs, lineHeight: 1.5 }}>
-                      {mode === "game"
-                        ? (() => {
-                            const ctr = { n: 0, pending: false };
-                            return renderedLines.map((ln) => {
-                              if (ln.kind === "blank") return <div key={ln.key} style={{ height: effFs * 0.7 }} />;
-                              if (ln.kind === "section") return <div key={ln.key} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
-                              if (ln.kind === "chord") return <div key={ln.key} style={{ whiteSpace: "pre", letterSpacing: "0.04em" }}>{renderGameChordLine(ln.raw, displayShift, ctr, gScore.status, gActive, eventEls, onChordTap)}</div>;
-                              return <div key={ln.key} style={{ color: C.text, whiteSpace: "pre" }}>{ln.text || " "}</div>;
-                            });
-                          })()
-                        : renderedLines.map((ln) => {
-                            if (ln.kind === "blank") return <div key={ln.key} style={{ height: effFs * 0.7 }} />;
-                            if (ln.kind === "section") return <div key={ln.key} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
-                            if (ln.kind === "chord") return <div key={ln.key} style={{ color: C.amber, fontWeight: 700, letterSpacing: "0.04em", whiteSpace: "pre" }}>{renderChordLine(ln.text, displayShift, onChordTap)}</div>;
-                            return <div key={ln.key} style={{ color: C.text, whiteSpace: "pre" }}>{ln.text || " "}</div>;
-                          })}
-                      <div style={{ height: mode === "game" ? 260 : 140 }} />
+                      {(() => {
+                        const kON = mode === "karaoke" && karSync;
+                        let activeKey = null;
+                        if (kON) { for (const w of karSync.flat) { if (w.t <= kar.time) activeKey = w.li + ":" + w.wi; else break; } }
+                        const setRef = (li) => (el) => { lineEls.current[li] = el; };
+                        return renderedLines.map((ln) => {
+                          if (ln.kind === "blank") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ height: effFs * 0.7 }} />;
+                          if (ln.kind === "section") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
+                          if (ln.kind === "chord") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.amber, fontWeight: 700, letterSpacing: "0.04em", whiteSpace: "pre" }}>{renderChordLine(ln.text, displayShift, onChordTap)}</div>;
+                          if (kON && karSync.wordsByLine[ln.key]) return <div key={ln.key} ref={setRef(ln.key)} style={{ whiteSpace: "pre" }}>{renderKaraokeLyric(ln.text, karSync.wordsByLine[ln.key], kar.time, ln.key, activeKey)}</div>;
+                          return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.text, whiteSpace: "pre" }}>{ln.text || " "}</div>;
+                        });
+                      })()}
+                      <div style={{ height: 160 }} />
                     </div>
                   </div>
-                  {mode === "game" && game.phase === "playing" && <div style={S.hitLine} />}
+                  {mode === "gighero" && <div style={S.hitLine} />}
+                  {mode === "gighero" && <div className="neon-text" style={S.gigFloat}>Boa!</div>}
                 </div>
 
                 {mode === "free" ? (
@@ -995,52 +1174,74 @@ export default function Palco() {
                       <button className="palco-btn palco-play" style={{ ...S.playBtn, background: playing ? C.amber : C.surface2, color: playing ? "#1a140a" : C.amber, borderColor: playing ? C.amber : C.border }} onClick={() => setPlaying((p) => !p)} title={playing ? "Pausar" : "Tocar"}>{playing ? <Pause size={22} strokeWidth={2.4} fill="#1a140a" /> : <Play size={22} strokeWidth={2.2} fill={C.amber} style={{ marginLeft: 2 }} />}</button>
                       <div style={S.speedBlock}>
                         <div style={S.speedTop}><span style={S.speedLabel}>Velocidade</span><span style={S.speedVal}>{speed}</span></div>
-                        <input className="palco-range" type="range" min={1} max={10} step={1} value={speed} onChange={(e) => changeSpeed(Number(e.target.value))} style={{ width: "100%" }} />
+                        <input className="palco-range" type="range" min={0} max={SPEEDS.length - 1} step={1} value={Math.max(0, SPEEDS.indexOf(speed))} onChange={(e) => changeSpeed(SPEEDS[Number(e.target.value)])} style={{ width: "100%" }} />
                         <div style={S.speedScale}><span>Lento</span><span>Rápido</span></div>
                       </div>
                       <button className="palco-btn palco-icon" style={S.resetBtn} onClick={resetScroll} title="Voltar ao início"><RotateCcw size={18} strokeWidth={2.2} /></button>
                     </div>
                   </div>
+                ) : mode === "karaoke" ? (
+                  <div style={S.transportZone}>
+                    <div style={S.karPanel}>
+                      <input ref={audioFileRef} type="file" accept="audio/*" onChange={onAudioFileChange} style={{ display: "none" }} />
+                      {kar.src === "youtube" && <div style={S.ytWrap} ref={ytDivRef} />}
+                      <audio ref={audioElRef}
+                        onLoadedMetadata={(e) => setKar((k) => ({ ...k, ready: true, dur: e.target.duration || 0 }))}
+                        onPlay={() => { setKar((k) => ({ ...k, playing: true })); startKarLoop(); }}
+                        onPause={() => { setKar((k) => ({ ...k, playing: false })); cancelAnimationFrame(karRafRef.current); }}
+                        onEnded={() => { setKar((k) => ({ ...k, playing: false })); cancelAnimationFrame(karRafRef.current); }}
+                        style={{ display: "none" }} />
+                      {kar.src === "none" ? (
+                        <div style={S.karSourceRow}>
+                          <span style={S.karHint}>Escolha a música para a cifra acompanhar:</span>
+                          <div style={S.karBtns}>
+                            <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={pickAudioFile}><Upload size={16} strokeWidth={2.1} /> Áudio do aparelho</button>
+                            <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={() => setKar((k) => ({ ...k, src: "ytinput" }))}><Youtube size={16} strokeWidth={2.1} /> YouTube</button>
+                          </div>
+                        </div>
+                      ) : kar.src === "ytinput" ? (
+                        <div style={S.karSourceRow}>
+                          <input ref={ytInputRef} className="palco-input" style={S.input} defaultValue={kar.url} placeholder="Cole o link do YouTube…" onKeyDown={(e) => { if (e.key === "Enter") loadYoutube(e.target.value); }} />
+                          <div style={S.karBtns}>
+                            <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={() => loadYoutube(ytInputRef.current ? ytInputRef.current.value : "")}>Carregar</button>
+                            <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={() => setKar((k) => ({ ...k, src: "none" }))}>Voltar</button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div style={S.karControls}>
+                          <button className="palco-btn palco-play" style={{ ...S.playBtn, background: kar.playing ? C.amber : C.surface2, color: kar.playing ? "#1a140a" : C.amber, borderColor: kar.playing ? C.amber : C.border }} onClick={karToggle} title={kar.playing ? "Pausar" : "Tocar"}>{kar.playing ? <Pause size={22} strokeWidth={2.4} fill="#1a140a" /> : <Play size={22} strokeWidth={2.2} fill={C.amber} style={{ marginLeft: 2 }} />}</button>
+                          <div style={S.karMid}>
+                            <div style={S.karSeekRow}>
+                              <span style={S.karTime}>{fmtMMSS(kar.time)}</span>
+                              <input className="palco-range" type="range" min={0} max={1000} value={kar.dur ? Math.round((kar.time / kar.dur) * 1000) : 0} onChange={(e) => karSeek(Number(e.target.value) / 1000)} style={{ flex: 1 }} />
+                              <span style={S.karTime}>{fmtMMSS(kar.dur)}</span>
+                            </div>
+                            <div style={S.karVolRow}>
+                              <button className="palco-btn palco-icon" style={S.karIcon} onClick={() => setKarMuted((v) => !v)} title={karMuted ? "Ativar som" : "Mudo"}>{karMuted ? <VolumeX size={16} strokeWidth={2.1} /> : <Volume2 size={16} strokeWidth={2.1} />}</button>
+                              <input className="palco-range" type="range" min={0} max={100} value={Math.round(karVol * 100)} onChange={(e) => setKarVol(Number(e.target.value) / 100)} style={{ width: 90 }} />
+                              <span style={S.karTag}>{kar.src === "youtube" ? "YouTube" : kar.fileName}</span>
+                              <button className="palco-btn palco-icon" style={S.karIcon} onClick={changeKarSource} title="Trocar fonte"><X size={16} strokeWidth={2.1} /></button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                      {karError && <div style={S.karErr}>{karError}</div>}
+                    </div>
+                  </div>
                 ) : (
                   <div style={S.transportZone}>
-                    <div style={S.gamePanel}>
-                      {(() => {
-                        const resolved = gScore.status.filter(Boolean).length;
-                        const bigIdx = gFlash ? gFlash.idx : gActive;
-                        const bigChord = (chart[bigIdx] && chart[bigIdx].chord) || "—";
-                        const bigColor = gFlash ? (gFlash.kind === "hit" ? C.green : C.red) : C.amber;
-                        if (!hasChart) return (
-                          <div style={S.gameInfo}>
-                            <strong style={{ color: C.text }}>O Modo Jogo precisa de marcações de tempo.</strong>
-                            <span>Adicione <code style={S.code}>[mm:ss]</code> antes dos acordes na cifra — ex.: <code style={S.code}>[00:12] Em</code>. Cada acorde marcado vira um alvo no ritmo. Importe o exemplo <em>"Treino de Ritmo"</em> para testar.</span>
-                          </div>
-                        );
-                        if (game.phase === "unsupported") return (<div style={S.gameInfo}><span>Seu navegador não dá acesso ao microfone aqui (comum em arquivo local). Use o app publicado em <strong>https</strong> para jogar.</span></div>);
-                        if (game.phase === "denied") return (<div style={S.gameRow}><span style={{ ...S.gameHint, flex: 1 }}>Microfone bloqueado. Autorize o acesso e tente de novo.</span><button className="palco-btn palco-primary" style={S.btnPrimary} onClick={startGame}>Tentar de novo</button></div>);
-                        if (game.phase === "countdown") return (<div style={S.gameCountWrap}><div style={S.gameCount}>{game.n}</div><span style={S.gameHint}>Prepare o violão…</span></div>);
-                        if (game.phase === "playing") return (
-                          <div style={S.gameRow}>
-                            <div style={{ ...S.gameBig, color: bigColor }}>{bigChord}</div>
-                            <div style={S.gameStats}>
-                              <div style={S.gameStatLine}><span style={{ color: C.green }}>● {gScore.hits}</span><span style={{ color: C.red }}>● {resolved - gScore.hits}</span></div>
-                              <div style={S.gameHint}>{resolved}/{gScore.total} acordes</div>
-                            </div>
-                            <button className="palco-btn palco-icon" style={S.resetBtn} onClick={stopGame} title="Parar jogo"><X size={18} strokeWidth={2.2} /></button>
-                          </div>
-                        );
-                        return (
-                          <div style={S.gameRow}>
-                            <button className="palco-btn palco-play" style={{ ...S.playBtn, background: C.surface2, color: C.amber, borderColor: C.border }} onClick={startGame} title="Iniciar jogo"><Play size={22} strokeWidth={2.2} fill={C.amber} style={{ marginLeft: 2 }} /></button>
-                            <div style={S.gameStats}>
-                              <div style={{ ...S.gameStatLine, color: C.text, fontWeight: 600, fontSize: 15 }}>Iniciar jogo</div>
-                              <div style={S.gameHint}>{chart.length} acordes no ritmo · precisa de microfone</div>
-                            </div>
-                          </div>
-                        );
-                      })()}
+                    <div style={S.gigPanel}>
+                      <div style={S.gigHud}>
+                        <div style={S.gigStat}><span style={S.gigStatLabel}>Pontos</span><span style={S.gigScore}>0</span></div>
+                        <div style={S.gigStat}><span style={S.gigStatLabel}>Combo</span><span style={S.gigCombo}>x1</span></div>
+                        <div style={S.gigFeedback}>Pronto?</div>
+                      </div>
+                      <button className="palco-btn palco-primary neon" style={{ ...S.btnPrimary, opacity: 0.6, cursor: "not-allowed" }} disabled><Play size={17} strokeWidth={2.2} fill="#1a140a" /> Iniciar GigHero</button>
+                      <p style={S.gigHint}>Validação pelo afinador chega no próximo update — a estrutura (linha do tempo, placar, combo e feedback) já está pronta.</p>
                     </div>
                   </div>
                 )}
+                </>)}
               </>
             )}
           </main>
@@ -1049,27 +1250,7 @@ export default function Palco() {
 
       {popover && <ChordPopover data={popover} onClose={() => setPopover(null)} />}
       {tunerOpen && <Tuner onClose={() => setTunerOpen(false)} />}
-      {game.phase === "finished" && (() => {
-        const pct = gScore.total ? Math.round((gScore.hits / gScore.total) * 100) : 0;
-        const g = gradeFor(pct);
-        return (
-          <div style={S.tunerOverlay} onClick={stopGame}>
-            <div style={S.scoreCard} onClick={(e) => e.stopPropagation()}>
-              <div style={S.tunerHead}><div style={{ display: "flex", alignItems: "center", gap: 9 }}><Music2 size={18} color={C.amber} strokeWidth={2.2} /><span style={S.tunerTitle}>Resultado</span></div><button className="palco-btn palco-icon" style={S.popClose} onClick={stopGame}><X size={16} strokeWidth={2.3} /></button></div>
-              <div style={S.scoreBody}>
-                <div style={{ ...S.scoreGrade, color: g.color }}>{g.letter}</div>
-                <div style={{ ...S.scorePct, color: C.text }}>{pct}%</div>
-                <div style={{ ...S.scoreLabel, color: g.color }}>Nota {g.letter} — {g.label}</div>
-                <div style={S.scoreSub}>Você acertou {gScore.hits} de {gScore.total} acordes no tempo certo</div>
-                <div style={S.scoreActions}>
-                  <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={startGame}><Play size={17} strokeWidth={2.2} fill="#1a140a" /> Jogar de novo</button>
-                  <button className="palco-btn palco-ghost" style={S.btnGhost} onClick={stopGame}>Sair</button>
-                </div>
-              </div>
-            </div>
-          </div>
-        );
-      })()}
+      {renameModal}
     </div>
   );
 }
@@ -1134,6 +1315,25 @@ function renderGameChordLine(text, shift, ctr, statusArr, activeIdx, elsRef, onC
     } else {
       nodes.push(<span key={i}>{tok}</span>);
     }
+  }
+  return nodes;
+}
+
+/* ----- render de linha de letra no Modo Karaokê (palavra a palavra) - */
+function renderKaraokeLyric(text, words, time, li, activeKey) {
+  const parts = []; const re = /(\s+)|(\S+)/g; let m;
+  while ((m = re.exec(text))) parts.push(m[1] !== undefined ? { g: m[1] } : { t: m[2] });
+  const nodes = []; let wi = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (p.g !== undefined) { nodes.push(<span key={i}>{p.g}</span>); continue; }
+    const w = words && words[wi];
+    const sung = w && time >= w.t;
+    const cur = activeKey === li + ":" + wi;
+    nodes.push(
+      <span key={i} style={{ color: sung && !cur ? C.amber : C.text, fontWeight: cur ? 700 : 400, background: cur ? "rgba(240,168,51,.22)" : "transparent", borderRadius: 4, transition: "color .12s, background .12s" }}>{p.t}</span>
+    );
+    wi++;
   }
   return nodes;
 }
@@ -1259,13 +1459,34 @@ function Tuner({ onClose }) {
 function Wordmark({ small }) {
   return (
     <div style={{ display: "flex", alignItems: "center", gap: small ? 9 : 12 }}>
-      <div style={{ width: small ? 30 : 42, height: small ? 30 : 42, borderRadius: small ? 9 : 12, background: `linear-gradient(150deg, ${C.amber}, ${C.amberDeep})`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: "0 4px 18px rgba(240,168,51,.28)", flexShrink: 0 }}>
+      <div style={{ width: small ? 30 : 42, height: small ? 30 : 42, borderRadius: small ? 9 : 12, background: `linear-gradient(150deg, ${C.amber}, ${C.amberDeep})`, display: "flex", alignItems: "center", justifyContent: "center", boxShadow: `0 0 18px rgba(240,168,51,.55), 0 4px 18px rgba(240,168,51,.30)`, flexShrink: 0 }}>
         <Music2 size={small ? 17 : 23} color="#1a140a" strokeWidth={2.4} />
       </div>
       <div style={{ lineHeight: 1 }}>
-        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: small ? 19 : 28, color: C.text, letterSpacing: "0.02em" }}>PALCO</div>
-        {!small && <div style={{ fontFamily: FONT_UI, fontSize: 12, color: C.textFaint, letterSpacing: "0.14em", marginTop: 3 }}>CIFRAS AO VIVO</div>}
+        <div style={{ fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: small ? 19 : 28, color: C.text, letterSpacing: "0.01em", textShadow: `0 0 14px rgba(240,168,51,.45)` }}>MyStage</div>
+        {!small && <div style={{ fontFamily: FONT_UI, fontSize: 11.5, color: C.amber, letterSpacing: "0.16em", marginTop: 4, textTransform: "uppercase", opacity: 0.85 }}>Seu Assistente de Performance</div>}
       </div>
+    </div>
+  );
+}
+
+/* ----------------- cronômetro de palco (pausa/zera) --------------- */
+function StageClock() {
+  const [run, setRun] = useState(false);
+  const [sec, setSec] = useState(0);
+  useEffect(() => {
+    if (!run) return;
+    const id = setInterval(() => setSec((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [run]);
+  const p = (n) => String(n).padStart(2, "0");
+  const hh = Math.floor(sec / 3600), mm = Math.floor((sec % 3600) / 60), ss = sec % 60;
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, fontFamily: FONT_MONO }}>
+      <Clock size={14} strokeWidth={2.2} color={run ? C.amber : C.textFaint} />
+      <span style={{ fontSize: 15, fontWeight: 700, letterSpacing: "0.04em", color: run ? C.text : C.textDim, minWidth: hh ? 70 : 50, textAlign: "right" }}>{hh ? p(hh) + ":" : ""}{p(mm)}:{p(ss)}</span>
+      <button className="palco-btn palco-icon" style={S.clockBtn} onClick={() => setRun((r) => !r)} title={run ? "Pausar cronômetro" : "Iniciar cronômetro"}>{run ? <Pause size={13} strokeWidth={2.4} /> : <Play size={13} strokeWidth={2.4} fill="currentColor" style={{ marginLeft: 1 }} />}</button>
+      <button className="palco-btn palco-icon" style={S.clockBtn} onClick={() => { setRun(false); setSec(0); }} title="Zerar cronômetro"><RotateCcw size={13} strokeWidth={2.3} /></button>
     </div>
   );
 }
@@ -1409,4 +1630,41 @@ const S = {
   scoreLabel: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17 },
   scoreSub: { fontSize: 13, color: C.textFaint, marginTop: 2, maxWidth: 300, lineHeight: 1.5 },
   scoreActions: { display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap", justifyContent: "center" },
+  // ----- Modo Karaokê -----
+  karPanel: { maxWidth: 720, margin: "0 auto", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 18, padding: "12px 16px", boxShadow: "0 12px 40px rgba(0,0,0,.45)" },
+  ytWrap: { position: "relative", width: "100%", aspectRatio: "16 / 9", maxHeight: 190, borderRadius: 12, overflow: "hidden", marginBottom: 12, background: "#000" },
+  karSourceRow: { display: "flex", flexDirection: "column", gap: 10 },
+  karHint: { fontSize: 12.5, color: C.textFaint },
+  karBtns: { display: "flex", gap: 10, flexWrap: "wrap" },
+  karControls: { display: "flex", alignItems: "center", gap: 16 },
+  karMid: { flex: 1, minWidth: 0, display: "flex", flexDirection: "column", gap: 9 },
+  karSeekRow: { display: "flex", alignItems: "center", gap: 10 },
+  karTime: { fontFamily: FONT_MONO, fontSize: 12, color: C.textDim, minWidth: 42, textAlign: "center" },
+  karVolRow: { display: "flex", alignItems: "center", gap: 10 },
+  karIcon: { width: 34, height: 34, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, cursor: "pointer", flexShrink: 0 },
+  karTag: { flex: 1, minWidth: 0, fontSize: 12, color: C.textFaint, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  karErr: { marginTop: 10, padding: "9px 13px", background: "rgba(224,104,60,.10)", border: `1px solid rgba(224,104,60,.35)`, borderRadius: 10, color: "#eaa389", fontSize: 12.5 },
+  // ----- Importar cifra numa faixa -----
+  importPane: { position: "relative", flex: 1, minHeight: 0, overflowY: "auto", width: "100%", maxWidth: 760, margin: "0 auto", padding: "20px 18px 32px", display: "flex", flexDirection: "column", gap: 12 },
+  importPaneTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16, color: C.text, margin: 0 },
+  ugLink: { display: "inline-flex", alignItems: "center", gap: 8, alignSelf: "flex-start", background: C.surface, color: C.amber, border: `1px solid ${C.border}`, borderRadius: 10, padding: "10px 15px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 14, textDecoration: "none" },
+  importPaneHint: { fontSize: 13, color: C.textDim, lineHeight: 1.5, margin: 0 },
+  importPaneArea: { width: "100%", minHeight: 220, flex: "1 1 auto", resize: "vertical", background: C.surface, color: C.text, border: `1px solid ${C.border}`, borderRadius: 14, padding: "16px", fontFamily: FONT_MONO, fontSize: 13.5, lineHeight: 1.6 },
+  ugTool: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 34, height: 34, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, flexShrink: 0, textDecoration: "none" },
+  // ----- Relógio de palco / aviso de capo -----
+  stageBar: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "8px 16px", borderBottom: `1px solid ${C.borderSoft}`, flexShrink: 0, flexWrap: "wrap" },
+  clockBtn: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 8, cursor: "pointer", flexShrink: 0 },
+  capoBanner: { display: "inline-flex", alignItems: "center", gap: 8, background: "rgba(240,168,51,.14)", color: C.amber, border: `1px solid ${C.amber}`, borderRadius: 10, padding: "6px 13px", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 13.5, letterSpacing: "0.05em", textTransform: "uppercase" },
+  // ----- Modo GigHero (scaffold) -----
+  gigPanel: { maxWidth: 720, margin: "0 auto", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 18, padding: "14px 18px", boxShadow: "0 12px 40px rgba(0,0,0,.45)", display: "flex", flexDirection: "column", gap: 12 },
+  gigHud: { display: "flex", alignItems: "center", gap: 18 },
+  gigStat: { display: "flex", flexDirection: "column", gap: 2 },
+  gigStatLabel: { fontSize: 10.5, letterSpacing: "0.1em", textTransform: "uppercase", color: C.textFaint, fontWeight: 600 },
+  gigScore: { fontFamily: FONT_MONO, fontWeight: 700, fontSize: 22, color: C.amber },
+  gigCombo: { fontFamily: FONT_MONO, fontWeight: 700, fontSize: 22, color: C.teal },
+  gigFeedback: { marginLeft: "auto", fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16, color: C.textDim },
+  gigFloat: { position: "absolute", left: "50%", top: "30%", transform: "translateX(-50%)", fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 26, color: C.green, pointerEvents: "none" },
+  gigHint: { fontSize: 12, color: C.textFaint, lineHeight: 1.5, margin: 0 },
+  // ----- Renomear música -----
+  renameCard: { width: "100%", maxWidth: 380, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 18, padding: 18, boxShadow: "0 24px 70px rgba(0,0,0,.6)" },
 };

@@ -1,3 +1,6 @@
 node_modules/
 dist/app.js
 .DS_Store
+# textos de teste com cifras/letras (não redistribuir conteúdo licenciado)
+tools/*.txt
+tools/*.json

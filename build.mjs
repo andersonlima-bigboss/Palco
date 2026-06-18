@@ -16,7 +16,7 @@ const icon180 = `data:image/png;base64,${b64("./assets/icon-180.png")}`;
 const manifest =
   "data:application/manifest+json," +
   JSON.stringify({
-    name: "Palco — Cifras ao Vivo", short_name: "Palco", start_url: ".",
+    name: "MyStage — Assistente de Performance", short_name: "MyStage", start_url: ".",
     display: "standalone", orientation: "portrait",
     background_color: "#14110D", theme_color: "#14110D",
     icons: [
@@ -30,12 +30,12 @@ const page = (appJs) => `<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
-<title>Palco — Cifras ao Vivo</title>
+<title>MyStage — Assistente de Performance</title>
 <meta name="theme-color" content="#14110D">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<meta name="apple-mobile-web-app-title" content="Palco">
+<meta name="apple-mobile-web-app-title" content="MyStage">
 <link rel="icon" type="image/png" href="${icon192}">
 <link rel="apple-touch-icon" href="${icon180}">
 <link rel="manifest" href="${manifest}">
