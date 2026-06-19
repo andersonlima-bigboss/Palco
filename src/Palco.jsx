@@ -4,7 +4,7 @@ import {
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
   Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
   Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Image as ImageIcon,
-  RotateCw, GripVertical, Eye, EyeOff,
+  RotateCw, GripVertical, Eye, EyeOff, ChevronRight,
 } from "lucide-react";
 
 /* ================================================================== */
@@ -400,6 +400,28 @@ function chordDiagram(name) {
   const f = useA ? fretA : fretE;
   return { name, frets: tmpl.map((o) => (o < 0 ? -1 : f + o)), approx };
 }
+// várias formas (voicings) do mesmo acorde, para navegar com setas no pop-up
+function chordVariations(name) {
+  const p = parseChord(name); if (!p) return [];
+  const out = [];
+  const exact = p.root + p.suffix;
+  if (OPEN[exact]) out.push({ frets: parseFretStr(OPEN[exact]), approx: false });
+  const rootI = NOTE_TO_I[p.root];
+  if (rootI != null) {
+    const { q, approx } = normQuality(p.suffix);
+    const fretE = (((rootI - 4) % 12) + 12) % 12, fretA = (((rootI - 9) % 12) + 12) % 12;
+    const eShape = E_SHAPE[q] || E_SHAPE.maj, aShape = A_SHAPE[q] || A_SHAPE.maj;
+    const cands = [
+      { f: fretA, t: aShape }, { f: fretE, t: eShape },
+      { f: fretA + 12, t: aShape }, { f: fretE + 12, t: eShape },
+    ].sort((x, y) => x.f - y.f);
+    for (const c of cands) if (c.t && c.f <= 12) out.push({ frets: c.t.map((o) => (o < 0 ? -1 : c.f + o)), approx });
+  }
+  const seen = new Set(), uniq = [];
+  for (const s of out) { const k = s.frets.join(","); if (!seen.has(k)) { seen.add(k); uniq.push(s); } }
+  if (!uniq.length) { const d = chordDiagram(name); if (d) uniq.push({ frets: d.frets, approx: d.approx }); }
+  return uniq;
+}
 
 /* ------------------------ pitch (afinador) ------------------------ */
 function autoCorrelate(buf, sampleRate) {
@@ -666,6 +688,8 @@ export default function Palco() {
   const dragRef = useRef(null);
 
   const scrollRef = useRef(null), rafRef = useRef(null), accRef = useRef(0), fileInputRef = useRef(null);
+  const cifraPtrs = useRef(new Map());   // pinça (2 dedos) p/ redimensionar a fonte da cifra
+  const cifraPinch = useRef(null);
   const audioFileRef = useRef(null);  // <input type=file> do áudio local
   const audioElRef = useRef(null);    // <audio> do arquivo local
   const ytRef = useRef(null);         // player do YouTube
@@ -825,6 +849,20 @@ export default function Palco() {
     return Math.max(11, Math.min(32, fs));
   }, [containerW, maxChars, fontSize]);
   const effFs = autoFit ? fitSize : fontSize;
+  // pinça (2 dedos) na cifra -> muda o tamanho da fonte
+  const pinchDist = (m) => { const p = [...m.values()]; return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); };
+  const onCifraDown = (e) => { cifraPtrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY }); if (cifraPtrs.current.size === 2) cifraPinch.current = { d0: pinchDist(cifraPtrs.current), f0: effFs }; };
+  const onCifraMove = (e) => {
+    if (!cifraPtrs.current.has(e.pointerId)) return;
+    cifraPtrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (cifraPtrs.current.size >= 2 && cifraPinch.current) {
+      e.preventDefault();
+      const nf = Math.max(11, Math.min(40, Math.round(cifraPinch.current.f0 * (pinchDist(cifraPtrs.current) / (cifraPinch.current.d0 || 1)))));
+      if (autoFit) setAutoFit(false);
+      setFontSize(nf);
+    }
+  };
+  const onCifraUp = (e) => { cifraPtrs.current.delete(e.pointerId); if (cifraPtrs.current.size < 2) cifraPinch.current = null; };
 
   useEffect(() => {
     const el = scrollRef.current; if (!el) return;
@@ -1780,8 +1818,8 @@ export default function Palco() {
                   <div style={S.modeSeg}>
                     <button className="palco-btn" style={mode === "free" ? S.segActive : S.seg} onClick={() => switchMode("free")}>Palco</button>
                     <button className="palco-btn" style={mode === "karaoke" ? S.segActive : S.seg} onClick={() => switchMode("karaoke")}>Karaokê</button>
-                    <button className="palco-btn" style={mode === "gighero" ? S.segActive : S.seg} onClick={() => switchMode("gighero")}>GigHero</button>
                   </div>
+                  <button className="palco-btn" style={hideTabs ? S.tabToggleOn : S.tabToggle} onClick={() => setHideTabs((v) => !v)} title={hideTabs ? "Mostrar solos e tablaturas" : "Ocultar solos/tablaturas (só letra e acordes)"}>{hideTabs ? <Eye size={15} strokeWidth={2.1} /> : <EyeOff size={15} strokeWidth={2.1} />} Solos</button>
                   {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerIcon} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={16} strokeWidth={2.1} /></button>}
                   <div style={S.toolGroup}>
                     <span style={S.toolLabel}>Tom</span>
@@ -1796,8 +1834,7 @@ export default function Palco() {
                     <button className="palco-btn palco-icon" style={S.toolBtn} onClick={() => changeCapo(Math.min(11, capo + 1))}><Plus size={14} strokeWidth={2.5} /></button>
                   </div>
                   {(transpose !== 0 || capo !== 0) && <button className="palco-btn palco-icon" style={S.toolReset} onClick={resetToneCapo} title="Zerar tom e capo"><RotateCcw size={13} strokeWidth={2.3} /></button>}
-                  <button className="palco-btn palco-ghost" style={{ ...(hideTabs ? S.tabToggleOn : S.tabToggle), marginLeft: "auto" }} onClick={() => setHideTabs((v) => !v)} title={hideTabs ? "Mostrar solos e tablaturas" : "Ocultar solos/tablaturas (só letra e acordes)"}>{hideTabs ? <Eye size={15} strokeWidth={2.1} /> : <EyeOff size={15} strokeWidth={2.1} />} Solos</button>
-                  {selectedSong.link && <a href={selectedSong.link} target="_blank" rel="noreferrer" style={S.ugTool} title="Abrir cifra no Ultimate-Guitar"><FileText size={14} strokeWidth={2.1} /></a>}
+                  {selectedSong.link && <a href={selectedSong.link} target="_blank" rel="noreferrer" style={{ ...S.ugTool, marginLeft: "auto" }} title="Abrir cifra no Ultimate-Guitar"><FileText size={14} strokeWidth={2.1} /></a>}
                 </div>
 
                 {capo > 0 && (
@@ -1807,7 +1844,7 @@ export default function Palco() {
                 )}
 
                 <div style={S.cifraWrap}>
-                  <div ref={scrollRef} className="palco-scroll" style={S.cifraScroll}>
+                  <div ref={scrollRef} className="palco-scroll" style={{ ...S.cifraScroll, touchAction: "pan-x pan-y" }} onPointerDown={onCifraDown} onPointerMove={onCifraMove} onPointerUp={onCifraUp} onPointerCancel={onCifraUp}>
                     <div style={{ ...S.cifra, fontSize: effFs, lineHeight: 1.5 }}>
                       {(() => {
                         const kON = mode === "karaoke" && karSync;
@@ -2004,22 +2041,38 @@ function renderKaraokeLyric(text, words, time, li, activeKey) {
 /* ------------------------ popover de diagrama --------------------- */
 function ChordPopover({ data, onClose, onMove }) {
   const d = chordDiagram(data.name);
-  const startDrag = (e) => {
+  const [scale, setScale] = useState(1);
+  const ptrs = useRef(new Map());
+  const gest = useRef(null);
+  const dist2 = (m) => { const p = [...m.values()]; return Math.hypot(p[0].x - p[1].x, p[0].y - p[1].y); };
+  const onDown = (e) => {
     if (e.target.closest("button")) return;
     e.preventDefault();
-    const sx = e.clientX, sy = e.clientY, ox = data.x, oy = data.y;
-    const move = (ev) => onMove(Math.max(2, ox + (ev.clientX - sx)), Math.max(2, oy + (ev.clientY - sy)));
-    const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch (er) {}
+    ptrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.current.size === 1) gest.current = { type: "drag", ox: data.x, oy: data.y, sx: e.clientX, sy: e.clientY };
+    else if (ptrs.current.size === 2) gest.current = { type: "pinch", d0: dist2(ptrs.current), s0: scale };
+  };
+  const onMv = (e) => {
+    if (!ptrs.current.has(e.pointerId)) return;
+    ptrs.current.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    const g = gest.current; if (!g) return;
+    if (g.type === "drag" && ptrs.current.size === 1) onMove(Math.max(2, g.ox + (e.clientX - g.sx)), Math.max(2, g.oy + (e.clientY - g.sy)));
+    else if (g.type === "pinch" && ptrs.current.size >= 2) setScale(Math.max(0.55, Math.min(1.8, g.s0 * (dist2(ptrs.current) / (g.d0 || 1)))));
+  };
+  const onUp = (e) => {
+    ptrs.current.delete(e.pointerId);
+    if (ptrs.current.size === 1) { const pt = [...ptrs.current.values()][0]; gest.current = { type: "drag", ox: data.x, oy: data.y, sx: pt.x, sy: pt.y }; }
+    else if (ptrs.current.size === 0) gest.current = null;
   };
   return (
-    <div style={{ ...S.popCard, left: data.x, top: data.y }}>
-      <div style={S.popHead} onPointerDown={startDrag} title="Arraste para mover">
+    <div style={{ ...S.popCard, left: data.x, top: data.y, transform: `scale(${scale})`, transformOrigin: "top left", touchAction: "none" }}
+      onPointerDown={onDown} onPointerMove={onMv} onPointerUp={onUp} onPointerCancel={onUp}>
+      <div style={S.popHead} title="Arraste para mover · pinça para redimensionar">
         <span style={S.popName}>{data.name}</span>
         <button className="palco-btn palco-icon" style={S.popClose} onClick={onClose}><X size={13} strokeWidth={2.6} /></button>
       </div>
-      {d ? (<><ChordDiagram frets={d.frets} /><div style={S.popHint}>{d.approx ? "forma aproximada" : "violão · destro"}</div></>) : (<div style={S.popNone}>Diagrama indisponível.</div>)}
+      {d ? (<><ChordDiagram frets={d.frets} /><div style={S.popHint}>{d.approx ? "forma aproximada" : "violão · destro"}</div></>) : <div style={S.popNone}>Diagrama indisponível.</div>}
     </div>
   );
 }
@@ -2255,6 +2308,9 @@ const S = {
   popName: { fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, color: NEON_GREEN, textShadow: `0 0 8px ${NEON_GREEN}66` },
   popClose: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textFaint, border: "none", borderRadius: 6, cursor: "pointer" },
   popHint: { fontSize: 9.5, color: C.textFaint, textAlign: "center", marginTop: 3, letterSpacing: "0.04em" },
+  popVarRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginTop: 4, minHeight: 22 },
+  popVarBtn: { width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: NEON_GREEN, border: `1px solid ${NEON_GREEN}44`, borderRadius: 6, cursor: "pointer" },
+  popVarLabel: { fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 600, color: C.textDim, minWidth: 30, textAlign: "center" },
   popNone: { fontSize: 11.5, color: C.textDim, padding: "8px 4px", textAlign: "center" },
   popClearAll: { position: "fixed", left: "50%", bottom: "calc(env(safe-area-inset-bottom) + 14px)", transform: "translateX(-50%)", zIndex: 51, display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.border}`, borderRadius: 99, padding: "8px 15px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", boxShadow: "0 6px 20px rgba(0,0,0,.5)" },
   tunerOverlay: { position: "fixed", inset: 0, background: "rgba(8,6,4,.72)", backdropFilter: "blur(3px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 60 },
