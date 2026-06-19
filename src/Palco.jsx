@@ -641,6 +641,7 @@ export default function Palco() {
   const [pendingDelete, setPendingDelete] = useState(null);
   const [libMsg, setLibMsg] = useState("");
   const [query, setQuery] = useState("");
+  const [searchFocused, setSearchFocused] = useState(false);
 
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState(DEFAULT_SPEED);
@@ -891,7 +892,7 @@ export default function Palco() {
   /* navegação */
   const openAlbum = (id) => { setCurrentAlbumId(id); setSelected(isMobileNow() ? null : 0); setView("album"); resetSongState(); };
   const openSong = (idx) => { setSelected(idx); resetSongState(); };
-  const openSongRef = (albumId, idx) => { setCurrentAlbumId(albumId); setView("album"); setQuery(""); setTimeout(() => setSelected(idx), 0); resetSongState(); };
+  const openSongRef = (albumId, idx) => { setCurrentAlbumId(albumId); setView("album"); setQuery(""); setSearchFocused(false); setTimeout(() => setSelected(idx), 0); resetSongState(); };
   const resetSongState = () => { setPlaying(false); accRef.current = 0; setPopovers([]); if (scrollRef.current) scrollRef.current.scrollTop = 0; };
   const backToSongs = () => { setPlaying(false); setSelected(null); setPopovers([]); };
   const backToAlbums = () => {
@@ -1009,12 +1010,16 @@ export default function Palco() {
   const movePopover = (id, x, y) => setPopovers((p) => p.map((q) => (q.id === id ? { ...q, x, y } : q)));
 
   /* busca */
+  // busca: todas as cifras (mais recentes primeiro); ao digitar, mostra as que começam com o texto
   const results = useMemo(() => {
-    const q = query.trim().toLowerCase(); if (!q) return [];
-    const out = [];
-    for (const al of library.albums) al.songs.forEach((s, i) => { if (s.title.toLowerCase().includes(q) || al.name.toLowerCase().includes(q)) out.push({ albumId: al.id, albumName: al.name, idx: i, title: s.title }); });
-    return out.slice(0, 60);
-  }, [query, library]);
+    const all = [];
+    for (const al of library.albums) (al.songs || []).forEach((s, i) => all.push({ albumId: al.id, albumName: al.name, idx: i, title: s.title, created: al.createdAt || 0 }));
+    all.sort((a, b) => (b.created - a.created) || (b.idx - a.idx));
+    const q = query.trim().toLowerCase();
+    if (!q) return all.slice(0, 250);
+    const starts = (t) => { const tl = (t || "").toLowerCase(); return tl.startsWith(q) || tl.split(/\s+/).some((w) => w.startsWith(q)); };
+    return all.filter((s) => starts(s.title) || (s.albumName || "").toLowerCase().startsWith(q)).slice(0, 120);
+  }, [query, library.albums]);
 
   /* ===================== Modo Karaokê: controle ===================== */
   const stopKar = () => {
@@ -1592,8 +1597,8 @@ export default function Palco() {
 
           <div style={S.searchWrap}>
             <Search size={17} color={C.textFaint} strokeWidth={2} />
-            <input className="palco-input" style={S.searchInput} value={query} onChange={(e) => setQuery(e.target.value)} placeholder="Buscar música ou álbum…" />
-            {query && <button className="palco-btn palco-icon" style={S.searchClear} onClick={() => setQuery("")}><X size={15} strokeWidth={2.2} /></button>}
+            <input className="palco-input" style={S.searchInput} value={query} onChange={(e) => setQuery(e.target.value)} onFocus={() => setSearchFocused(true)} onBlur={() => setTimeout(() => setSearchFocused(false), 180)} placeholder="Buscar música (toque para ver todas)…" />
+            {(query || searchFocused) && <button className="palco-btn palco-icon" style={S.searchClear} onMouseDown={(e) => e.preventDefault()} onClick={() => { setQuery(""); setSearchFocused(false); }}><X size={15} strokeWidth={2.2} /></button>}
           </div>
 
           <div style={S.sessionCard}>
@@ -1606,7 +1611,7 @@ export default function Palco() {
             ) : (
               <div style={S.sessionRow}>
                 <input className="palco-input" style={{ ...S.input, flex: 1, minWidth: 160 }} value={sessionName} onChange={(e) => setSessionName(e.target.value)} placeholder="Nome da apresentação (ex: Bar do Zé)" onKeyDown={(e) => { if (e.key === "Enter") startSession(); }} />
-                <button className="palco-btn palco-primary neon" style={S.btnPrimary} onClick={startSession}><Play size={16} strokeWidth={2.4} fill="#1a140a" /> Iniciar</button>
+                <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={startSession}><Play size={16} strokeWidth={2.4} fill="#fff" /> Iniciar</button>
               </div>
             )}
             <p style={S.sessionHint}>O cronômetro só aparece nas telas quando há apresentação rodando. Ao encerrar, o setlist e o tempo de cada música ficam salvos em <strong>Sessões</strong>.</p>
@@ -1632,13 +1637,14 @@ export default function Palco() {
           {libMsg && <div style={S.libMsg}>{libMsg}</div>}
           {!storageOK && <div style={S.storageNote}>Este navegador não está guardando os dados entre sessões (comum ao abrir arquivo local). Use <strong>Backup</strong> e <strong>Restaurar</strong>, ou hospede em https.</div>}
 
-          {query ? (
+          {(searchFocused || query.trim()) ? (
             results.length === 0 ? (
-              <div style={S.emptyAlbums}><p style={S.emptySub}>Nenhuma música encontrada para “{query}”.</p></div>
+              <div style={S.emptyAlbums}><p style={S.emptySub}>{query.trim() ? `Nenhuma música começando com "${query.trim()}".` : "Nenhuma cifra importada ainda."}</p></div>
             ) : (
               <div style={{ marginTop: 8 }}>
-                {results.map((r, i) => (
-                  <button key={i} className="palco-song palco-btn" style={S.resultItem} onClick={() => openSongRef(r.albumId, r.idx)}>
+                {!query.trim() && <div style={S.searchListHead}>Todas as cifras · mais recentes primeiro</div>}
+                {results.map((r) => (
+                  <button key={r.albumId + ":" + r.idx} className="palco-song palco-btn" style={S.resultItem} onMouseDown={(e) => e.preventDefault()} onClick={() => openSongRef(r.albumId, r.idx)}>
                     <Music2 size={15} color={C.textFaint} strokeWidth={2} />
                     <span style={S.resultMeta}><span style={S.resultTitle}>{r.title}</span><span style={S.resultAlbum}>{r.albumName}</span></span>
                     <span className="palco-chev" style={S.songChev}>›</span>
@@ -1665,7 +1671,7 @@ export default function Palco() {
               {library.albums.map((a) => (
                 <div key={a.id} className="palco-album palco-btn" style={S.albumCard} onClick={() => openAlbum(a.id)} role="button" tabIndex={0} onKeyDown={(e) => e.key === "Enter" && openAlbum(a.id)}>
                   <div style={S.albumCover}>
-                    {a.cover ? <img src={a.cover} alt="" style={S.albumCoverImg} /> : <div style={S.albumCoverEmpty}><Disc3 className="palco-disc" size={38} color={C.textFaint} strokeWidth={1.5} /></div>}
+                    {a.cover ? <img src={a.cover} alt="" style={S.albumCoverImg} /> : <div style={S.albumCoverEmpty}><Disc3 className="palco-disc" size={26} color={C.textFaint} strokeWidth={1.5} /></div>}
                     <div style={S.albumCoverBtns} onClick={(e) => e.stopPropagation()}>
                       <button className="palco-btn" style={S.coverBtn} onClick={() => { setCoverUrl(typeof a.cover === "string" && !a.cover.startsWith("data:") ? a.cover : ""); setCoverFor(a.id); }} title="Capa do álbum"><ImageIcon size={13} strokeWidth={2.1} /></button>
                       <button className="palco-btn" style={S.coverBtn} onClick={() => setRename({ kind: "album", albumId: a.id, value: a.name })} title="Renomear álbum"><Pencil size={13} strokeWidth={2.1} /></button>
@@ -1948,7 +1954,7 @@ export default function Palco() {
       </div>
 
       {popovers.map((p) => <ChordPopover key={p.id} data={p} onClose={() => closePopover(p.id)} onMove={(x, y) => movePopover(p.id, x, y)} />)}
-      {popovers.length > 1 && <button className="palco-btn palco-ghost" style={S.popClearAll} onClick={() => setPopovers([])}><X size={14} strokeWidth={2.4} /> Fechar acordes ({popovers.length})</button>}
+      {popovers.length >= 1 && <button className="palco-btn palco-ghost neon" style={S.popClearAll} onClick={() => setPopovers([])}><EyeOff size={15} strokeWidth={2.3} /> Ocultar acordes ({popovers.length})</button>}
       {tunerOpen && <Tuner onClose={() => setTunerOpen(false)} />}
       {renameModal}
     </div>
@@ -2204,24 +2210,25 @@ const S = {
   iconGhostLabel: { fontSize: 13.5 },
   searchWrap: { display: "flex", alignItems: "center", gap: 9, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 12, padding: "0 12px", marginBottom: 18 },
   searchInput: { flex: 1, background: "transparent", color: C.text, border: "none", outline: "none", padding: "13px 0", fontFamily: FONT_UI, fontSize: 15 },
+  searchListHead: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.textFaint, fontWeight: 600, padding: "4px 4px 8px" },
   searchClear: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textFaint, border: "none", borderRadius: 7, cursor: "pointer" },
   libMsg: { padding: "11px 15px", background: "rgba(121,183,166,.10)", border: `1px solid rgba(121,183,166,.3)`, borderRadius: 11, color: C.teal, fontSize: 13.5, marginBottom: 18 },
   storageNote: { padding: "11px 15px", background: "rgba(224,104,60,.10)", border: `1px solid rgba(224,104,60,.3)`, borderRadius: 11, color: C.textDim, fontSize: 13, marginBottom: 18 },
-  albumGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))", gap: 16 },
-  albumCard: { textAlign: "left", display: "flex", flexDirection: "column", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 16, padding: "14px 14px 18px", cursor: "pointer" },
-  albumCover: { position: "relative", width: "100%", aspectRatio: "1 / 1", borderRadius: 12, overflow: "hidden", marginBottom: 12, background: C.surface2, border: `1px solid ${C.border}` },
+  albumGrid: { display: "grid", gridTemplateColumns: "repeat(3, minmax(0, 1fr))", gap: 10 },
+  albumCard: { textAlign: "left", display: "flex", flexDirection: "column", gap: 3, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 13, padding: "8px 8px 11px", cursor: "pointer" },
+  albumCover: { position: "relative", width: "100%", aspectRatio: "1 / 1", borderRadius: 9, overflow: "hidden", marginBottom: 7, background: C.surface2, border: `1px solid ${C.border}` },
   albumCoverImg: { width: "100%", height: "100%", objectFit: "cover", display: "block" },
   albumCoverEmpty: { width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "center", background: `linear-gradient(145deg, ${C.surface2}, ${C.bg})` },
-  albumCoverBtns: { position: "absolute", top: 8, right: 8, display: "flex", gap: 5 },
-  coverBtn: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(20,17,13,.72)", color: C.text, border: `1px solid ${C.borderSoft}`, borderRadius: 8, cursor: "pointer", backdropFilter: "blur(4px)" },
+  albumCoverBtns: { position: "absolute", top: 5, right: 5, display: "flex", gap: 4 },
+  coverBtn: { width: 24, height: 24, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(20,17,13,.74)", color: C.text, border: `1px solid ${C.borderSoft}`, borderRadius: 7, cursor: "pointer", backdropFilter: "blur(4px)" },
   albumTop: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, minHeight: 46 },
   albumIcon: { width: 46, height: 46, borderRadius: 12, background: C.surface2, border: `1px solid ${C.border}`, display: "flex", alignItems: "center", justifyContent: "center" },
   albumTrash: { width: 32, height: 32, borderRadius: 9, background: "transparent", color: C.textFaint, border: `1px solid transparent`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
   confirmRow: { display: "flex", gap: 6 },
   confirmYes: { width: 32, height: 32, borderRadius: 9, background: "rgba(224,104,60,.18)", color: C.red, border: `1px solid ${C.red}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
   confirmNo: { width: 32, height: 32, borderRadius: 9, background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer" },
-  albumName: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 17, color: C.text, lineHeight: 1.25 },
-  albumCount: { fontSize: 12.5, color: C.textFaint },
+  albumName: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 13, color: C.text, lineHeight: 1.2 },
+  albumCount: { fontSize: 10.5, color: C.textFaint },
   emptyAlbums: { display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: "60px 24px", gap: 7 },
   resultItem: { width: "100%", display: "flex", alignItems: "center", gap: 12, textAlign: "left", padding: "12px 14px", border: `1px solid ${C.borderSoft}`, borderRadius: 11, cursor: "pointer", background: C.surface, marginBottom: 8 },
   resultMeta: { display: "flex", flexDirection: "column", gap: 2, flex: 1, minWidth: 0 },
@@ -2312,7 +2319,7 @@ const S = {
   popVarBtn: { width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: NEON_GREEN, border: `1px solid ${NEON_GREEN}44`, borderRadius: 6, cursor: "pointer" },
   popVarLabel: { fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 600, color: C.textDim, minWidth: 30, textAlign: "center" },
   popNone: { fontSize: 11.5, color: C.textDim, padding: "8px 4px", textAlign: "center" },
-  popClearAll: { position: "fixed", left: "50%", bottom: "calc(env(safe-area-inset-bottom) + 14px)", transform: "translateX(-50%)", zIndex: 51, display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.border}`, borderRadius: 99, padding: "8px 15px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", boxShadow: "0 6px 20px rgba(0,0,0,.5)" },
+  popClearAll: { position: "fixed", right: "calc(env(safe-area-inset-right) + 12px)", bottom: "calc(env(safe-area-inset-bottom) + 104px)", zIndex: 52, display: "inline-flex", alignItems: "center", gap: 7, background: C.amber, color: "#1a140a", border: `1px solid ${C.amber}`, borderRadius: 99, padding: "9px 15px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 13, cursor: "pointer", boxShadow: "0 6px 20px rgba(0,0,0,.5)" },
   tunerOverlay: { position: "fixed", inset: 0, background: "rgba(8,6,4,.72)", backdropFilter: "blur(3px)", display: "flex", alignItems: "center", justifyContent: "center", padding: 20, zIndex: 60 },
   tunerCard: { width: "100%", maxWidth: 380, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, padding: 20, boxShadow: "0 24px 70px rgba(0,0,0,.6)" },
   tunerHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
