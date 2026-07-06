@@ -6,6 +6,7 @@ import {
   Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Image as ImageIcon,
   RotateCw, GripVertical, Eye, EyeOff, ChevronRight,
 } from "lucide-react";
+import DEFAULT_LIBRARY from "./defaultLibrary.json";
 
 /* ================================================================== */
 /*  Palco — cifras ao vivo: rolagem, transpor, capo, diagramas,        */
@@ -721,7 +722,15 @@ export default function Palco() {
   useEffect(() => {
     (async () => {
       const v = await storageGet(STORAGE_KEY);
-      if (v) { try { const lib = JSON.parse(v); setLibrary({ albums: lib.albums || [], favorites: lib.favorites || [], settings: lib.settings || {}, sessions: lib.sessions || [], setlists: lib.setlists || [] }); } catch (e) {} }
+      let loaded = false;
+      if (v) { try { const lib = JSON.parse(v); setLibrary({ albums: lib.albums || [], favorites: lib.favorites || [], settings: lib.settings || {}, sessions: lib.sessions || [], setlists: lib.setlists || [] }); loaded = true; } catch (e) {} }
+      if (!loaded) {
+        // Primeiro acesso neste aparelho (sem dados salvos): carrega a biblioteca padrão
+        // embutida no app (versionada no GitHub) e a grava como cópia de trabalho local.
+        const seed = { albums: DEFAULT_LIBRARY.albums || [], favorites: DEFAULT_LIBRARY.favorites || [], settings: DEFAULT_LIBRARY.settings || {}, sessions: DEFAULT_LIBRARY.sessions || [], setlists: DEFAULT_LIBRARY.setlists || [] };
+        setLibrary(seed);
+        storageSet(STORAGE_KEY, JSON.stringify(seed));
+      }
       setStorageOK(storageWorks());
       setReady(true);
     })();
