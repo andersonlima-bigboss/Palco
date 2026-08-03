@@ -2445,17 +2445,17 @@ function ChordDiagram({ frets }) {
   const minF = positives.length ? Math.min(...positives) : 0;
   const base = maxF <= 4 ? 1 : minF;
   const { fingers, barre } = computeFingering(frets);
-  const W = 124, H = 140, padX = 16, padTop = 26, gridW = W - padX * 2, FRETS = 5;
+  const W = 124, H = 140, padL = 24, padR = 12, padTop = 26, gridW = W - padL - padR, FRETS = 5;
   const sx = gridW / 5, fy = (H - padTop - 12) / FRETS;
-  const stringX = (s) => padX + s * sx;
+  const stringX = (s) => padL + s * sx;
   const rowY = (f) => padTop + (f - base) * fy + fy / 2;
   const grid = NEON_GREEN, dot = "#FF4D4D", faint = C.textFaint;
   const R = 6.6;
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
-      {base === 1 && <rect x={padX - 1} y={padTop - 3} width={gridW + 2} height={3.5} fill={grid} rx={1} />}
-      {base > 1 && <text x={padX - 6} y={rowY(base) + 3} fontSize="9" fill={faint} textAnchor="end" fontFamily={FONT_MONO}>{base}ª</text>}
-      {Array.from({ length: FRETS + 1 }).map((_, r) => <line key={"h" + r} x1={padX} y1={padTop + r * fy} x2={padX + gridW} y2={padTop + r * fy} stroke={grid} strokeWidth={1} opacity={0.65} />)}
+      {base === 1 && <rect x={padL - 1} y={padTop - 3} width={gridW + 2} height={3.5} fill={grid} rx={1} />}
+      {base > 1 && <text x={padL - 7} y={rowY(base) + 3.5} fontSize="12" fill={C.amber} textAnchor="end" fontWeight="700" fontFamily={FONT_MONO}>{base}</text>}
+      {Array.from({ length: FRETS + 1 }).map((_, r) => <line key={"h" + r} x1={padL} y1={padTop + r * fy} x2={padL + gridW} y2={padTop + r * fy} stroke={grid} strokeWidth={1} opacity={0.65} />)}
       {Array.from({ length: 6 }).map((_, s) => <line key={"v" + s} x1={stringX(s)} y1={padTop} x2={stringX(s)} y2={padTop + FRETS * fy} stroke={grid} strokeWidth={1} opacity={0.65} />)}
       {/* marcadores de corda solta (○) / abafada (×) acima da pestana */}
       {frets.map((f, s) => {
