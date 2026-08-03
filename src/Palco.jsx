@@ -2178,7 +2178,6 @@ export default function Palco() {
                     <button className="palco-btn" style={mode === "karaoke" ? S.segActive : S.seg} onClick={() => switchMode("karaoke")}>Karaokê</button>
                   </div>
                   <button className="palco-btn" style={hideTabs ? S.tabToggleOn : S.tabToggle} onClick={() => setHideTabs((v) => !v)} title={hideTabs ? "Mostrar solos e tablaturas" : "Ocultar solos/tablaturas (só letra e acordes)"}>{hideTabs ? <Eye size={15} strokeWidth={2.1} /> : <EyeOff size={15} strokeWidth={2.1} />} Solos</button>
-                  <button className="palco-btn" style={simplify ? S.tabToggleOn : S.tabToggle} onClick={() => setSimplify((v) => !v)} title={simplify ? "Mostrar acordes originais" : "Simplificar acordes (tríades fáceis)"}><Sparkles size={15} strokeWidth={2.1} /> Fácil</button>
                   {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerIcon} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={16} strokeWidth={2.1} /></button>}
                   {recOn ? (
                     <button className="palco-btn" style={S.recBtnOn} onClick={() => stopRecordingAndSave(selectedSong?.title || (session && session.name) || "cifra")} title="Parar e salvar gravação">{recKind === "video" ? <Video size={14} strokeWidth={2.2} /> : <Square size={14} strokeWidth={2.4} fill="#fff" />} <span style={{ fontFamily: FONT_MONO, fontWeight: 700 }}>{fmtMMSS(recSec)}</span> ■</button>
@@ -2403,7 +2402,14 @@ function renderKaraokeLyric(text, words, time, li, activeKey) {
 
 /* ------------------------ popover de diagrama --------------------- */
 function ChordPopover({ data, onClose, onMove }) {
-  const d = chordDiagram(data.name);
+  const voicings = useMemo(() => {
+    let v = chordVariations(data.name);
+    if (!v.length) { const d = chordDiagram(data.name); if (d) v = [{ frets: d.frets, approx: d.approx }]; }
+    return v;
+  }, [data.name]);
+  const [vi, setVi] = useState(0);
+  const idx = voicings.length ? ((vi % voicings.length) + voicings.length) % voicings.length : 0;
+  const cur = voicings[idx] || null;
   const [scale, setScale] = useState(1);
   const ptrs = useRef(new Map());
   const gest = useRef(null);
@@ -2435,7 +2441,16 @@ function ChordPopover({ data, onClose, onMove }) {
         <span style={S.popName}>{data.name}</span>
         <button className="palco-btn palco-icon" style={S.popClose} onClick={onClose}><X size={13} strokeWidth={2.6} /></button>
       </div>
-      {d ? (<><ChordDiagram frets={d.frets} /><div style={S.popHint}>{d.approx ? "forma aproximada" : "violão · destro"}</div></>) : <div style={S.popNone}>Diagrama indisponível.</div>}
+      {cur ? (<>
+        <ChordDiagram frets={cur.frets} />
+        {voicings.length > 1 ? (
+          <div style={S.popNav}>
+            <button className="palco-btn palco-icon" style={S.popNavBtn} onClick={() => setVi(idx - 1)} title="Posição anterior"><ChevronLeft size={16} strokeWidth={2.4} /></button>
+            <span style={S.popNavLabel}>{idx + 1}/{voicings.length}{cur.approx ? " · aprox." : ""}</span>
+            <button className="palco-btn palco-icon" style={S.popNavBtn} onClick={() => setVi(idx + 1)} title="Próxima posição"><ChevronRight size={16} strokeWidth={2.4} /></button>
+          </div>
+        ) : <div style={S.popHint}>{cur.approx ? "forma aproximada" : "violão · destro"}</div>}
+      </>) : <div style={S.popNone}>Diagrama indisponível.</div>}
     </div>
   );
 }
@@ -2856,6 +2871,9 @@ const S = {
   popName: { fontFamily: FONT_MONO, fontSize: 14, fontWeight: 700, color: NEON_GREEN, textShadow: `0 0 8px ${NEON_GREEN}66` },
   popClose: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textFaint, border: "none", borderRadius: 6, cursor: "pointer" },
   popHint: { fontSize: 9.5, color: C.textFaint, textAlign: "center", marginTop: 3, letterSpacing: "0.04em" },
+  popNav: { display: "flex", alignItems: "center", justifyContent: "center", gap: 8, marginTop: 4 },
+  popNavBtn: { width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: C.amber, border: `1px solid ${C.borderSoft}`, borderRadius: 7, cursor: "pointer" },
+  popNavLabel: { fontFamily: FONT_MONO, fontSize: 11, fontWeight: 700, color: C.textDim, minWidth: 54, textAlign: "center" },
   popVarRow: { display: "flex", alignItems: "center", justifyContent: "center", gap: 4, marginTop: 4, minHeight: 22 },
   popVarBtn: { width: 24, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: NEON_GREEN, border: `1px solid ${NEON_GREEN}44`, borderRadius: 6, cursor: "pointer" },
   popVarLabel: { fontFamily: FONT_MONO, fontSize: 10.5, fontWeight: 600, color: C.textDim, minWidth: 30, textAlign: "center" },
