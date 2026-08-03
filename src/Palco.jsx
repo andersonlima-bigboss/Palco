@@ -676,7 +676,11 @@ export default function Palco() {
   const [recError, setRecError] = useState("");
   const [recSec, setRecSec] = useState(0);                         // segundos decorridos da gravação atual
   const [recKind, setRecKind] = useState(null);                    // "audio" | "video" | null
+  const [recPaused, setRecPaused] = useState(false);               // gravação pausada (app em segundo plano)
+  const recPausedRef = useRef(false);
   const recPreviewRef = useRef(null);                              // <video> de prévia da câmera
+  const [recPos, setRecPos] = useState(() => ({ x: (typeof window !== "undefined" ? window.innerWidth - 84 - 10 : 280), y: 110 })); // prévia à direita (arrastável)
+  const recDragRef = useRef(null);
   const [coverFor, setCoverFor] = useState(null);                  // id do álbum cuja capa está sendo editada
   const [coverUrl, setCoverUrl] = useState("");
   const coverFileRef = useRef(null);
@@ -727,7 +731,7 @@ export default function Palco() {
   }, [clockRun]);
   useEffect(() => {
     if (!recOn) return;
-    const id = setInterval(() => setRecSec((s) => s + 1), 1000);
+    const id = setInterval(() => { if (!recPausedRef.current) setRecSec((s) => s + 1); }, 1000);
     return () => clearInterval(id);
   }, [recOn]);
   useEffect(() => {
@@ -735,6 +739,19 @@ export default function Palco() {
       try { recPreviewRef.current.srcObject = recRef.current.stream; } catch (e) {}
     }
   }, [recOn, recKind]);
+  // pausa a gravação quando o app vai para segundo plano; avisa antes de fechar a aba
+  useEffect(() => {
+    if (!recOn) return;
+    const onVis = () => {
+      const r = recRef.current; if (!r || !r.recorder) return;
+      if (document.hidden && r.recorder.state === "recording") { try { r.recorder.pause(); } catch (e) {} recPausedRef.current = true; setRecPaused(true); }
+      else if (!document.hidden && r.recorder.state === "paused") { try { r.recorder.resume(); } catch (e) {} recPausedRef.current = false; setRecPaused(false); }
+    };
+    const onBeforeUnload = (e) => { e.preventDefault(); e.returnValue = ""; return ""; };
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => { document.removeEventListener("visibilitychange", onVis); window.removeEventListener("beforeunload", onBeforeUnload); };
+  }, [recOn]);
   useEffect(() => {
     (async () => {
       const v = await storageGet(STORAGE_KEY);
@@ -1310,11 +1327,12 @@ export default function Palco() {
       recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       recorder.start(1000);
       recRef.current = { stream, recorder, chunks, mime: recorder.mimeType || mime || (wantVideo ? "video/webm" : "audio/webm"), kind };
+      recPausedRef.current = false; setRecPaused(false);
       setRecKind(kind); setRecSec(0); setRecOn(true);
     } catch (e) { setRecError(wantVideo ? "Câmera/microfone bloqueados — precisa de https e permissão." : "Microfone bloqueado — segue sem gravar (precisa de https/permissão)."); }
   };
   const stopRecordingAndSave = (nm) => {
-    const r = recRef.current; recRef.current = null; setRecOn(false); setRecKind(null);
+    const r = recRef.current; recRef.current = null; setRecOn(false); setRecKind(null); recPausedRef.current = false; setRecPaused(false);
     if (r && recPreviewRef.current) { try { recPreviewRef.current.srcObject = null; } catch (e) {} }
     if (!r) return;
     const stopStream = () => { try { r.stream.getTracks().forEach((t) => t.stop()); } catch (e) {} };
@@ -1520,15 +1538,29 @@ export default function Palco() {
   ) : null;
   // badge de gravação — fixo no canto, visível em todas as telas enquanto grava
   const recBadge = recOn ? (
-    <div style={S.recBadgeFixed}>
-      {recKind === "video" ? <Video size={13} strokeWidth={2.3} className="neon-pulse" /> : <Circle size={11} strokeWidth={0} fill="#fff" className="neon-pulse" />}
-      <span style={{ fontWeight: 700, letterSpacing: 0.5 }}>REC</span>
+    <div style={{ ...S.recBadgeFixed, background: recPaused ? "#7a6a2e" : C.red }}>
+      {recPaused ? <span style={{ fontWeight: 800, fontSize: 11 }}>❚❚</span> : recKind === "video" ? <Video size={13} strokeWidth={2.3} className="neon-pulse" /> : <Circle size={11} strokeWidth={0} fill="#fff" className="neon-pulse" />}
+      <span style={{ fontWeight: 700, letterSpacing: 0.5 }}>{recPaused ? "PAUSADO" : "REC"}</span>
       <span style={{ fontFamily: FONT_MONO, fontSize: 12.5, fontWeight: 700, minWidth: 42, textAlign: "center" }}>{fmtMMSS(recSec)}</span>
       <button className="palco-btn" style={S.recBadgeBtn} onClick={() => stopRecordingAndSave(selectedSong?.title || (session && session.name) || "cifra")} title="Parar e salvar gravação"><Square size={11} strokeWidth={2.6} fill="currentColor" /></button>
     </div>
   ) : null;
+  const recPreviewDown = (e) => {
+    const el = e.currentTarget; try { el.setPointerCapture(e.pointerId); } catch (er) {}
+    recDragRef.current = { dx: e.clientX - recPos.x, dy: e.clientY - recPos.y, moved: false };
+  };
+  const recPreviewMove = (e) => {
+    const d = recDragRef.current; if (!d) return; d.moved = true;
+    const w = 84, h = 112, pad = 6;
+    const x = Math.max(pad, Math.min(window.innerWidth - w - pad, e.clientX - d.dx));
+    const y = Math.max(pad, Math.min(window.innerHeight - h - pad, e.clientY - d.dy));
+    setRecPos({ x, y });
+  };
+  const recPreviewUp = (e) => { const el = e.currentTarget; try { el.releasePointerCapture(e.pointerId); } catch (er) {} recDragRef.current = null; };
   const recPreview = recOn && recKind === "video" ? (
-    <video ref={recPreviewRef} autoPlay muted playsInline style={S.recPreview} />
+    <div style={{ ...S.recPreviewWrap, left: recPos.x, top: recPos.y }} onPointerDown={recPreviewDown} onPointerMove={recPreviewMove} onPointerUp={recPreviewUp} title="Arraste para posicionar">
+      <video ref={recPreviewRef} autoPlay muted playsInline style={S.recPreview} />
+    </div>
   ) : null;
   const overlays = <>{stageClock}{recBadge}{recPreview}</>;
 
@@ -1719,25 +1751,7 @@ export default function Palco() {
             {(query || searchFocused) && <button className="palco-btn palco-icon" style={S.searchClear} onMouseDown={(e) => e.preventDefault()} onClick={() => { setQuery(""); setSearchFocused(false); }}><X size={15} strokeWidth={2.2} /></button>}
           </div>
 
-          <div style={S.sessionCard}>
-            <div style={S.sessionCardTop}><Radio size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Apresentação ao vivo</span></div>
-            {session ? (
-              <>
-                <div style={S.sessionRow}>
-                  <span style={S.sessionLive}><span className="neon-pulse" style={S.sessionDot} /> {session.name} · <span style={{ fontFamily: FONT_MONO, fontWeight: 700, color: C.text }}>{clkLabel}</span></span>
-                  <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={endSession}><Square size={15} strokeWidth={2.4} fill="#fff" /> Encerrar</button>
-                </div>
-                {recOn && <div style={S.recRow}><span className="neon-pulse" style={S.recDot} /> Gravando áudio… (o arquivo é baixado ao encerrar)</div>}
-                {recError && <div style={S.recWarn}>{recError}</div>}
-              </>
-            ) : (
-              <div style={S.sessionRow}>
-                <input className="palco-input" style={{ ...S.input, flex: 1, minWidth: 160 }} value={sessionName} onChange={(e) => setSessionName(e.target.value)} placeholder="Nome da apresentação (ex: Bar do Zé)" onKeyDown={(e) => { if (e.key === "Enter") startSession(); }} />
-                <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={startSession}><Play size={16} strokeWidth={2.4} fill="#fff" /> Iniciar</button>
-              </div>
-            )}
-            <p style={S.sessionHint}>Ao iniciar, o cronômetro aparece nas telas e o <strong>áudio é gravado pelo microfone</strong>. Ao encerrar, o setlist e os tempos ficam em <strong>Sessões</strong> e a <strong>gravação é baixada</strong>. (Gravar precisa de https + permissão do microfone.)</p>
-          </div>
+          <Tuner inline />
 
           <div style={S.setlistHome}>
             <div style={S.sectionHead}><ListMusic size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Setlists</span><button className="palco-btn palco-ghost" style={{ ...S.iconGhost, marginLeft: "auto" }} onClick={newSetlist}><Plus size={15} strokeWidth={2.4} /> Criar setlist</button></div>
@@ -1806,6 +1820,26 @@ export default function Palco() {
               ))}
             </div>
           )}
+
+          <div style={{ ...S.sessionCard, marginTop: 22 }}>
+            <div style={S.sessionCardTop}><Radio size={16} color={C.red} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Apresentação ao vivo</span></div>
+            {session ? (
+              <>
+                <div style={S.sessionRow}>
+                  <span style={S.sessionLive}><span className="neon-pulse" style={S.sessionDot} /> {session.name} · <span style={{ fontFamily: FONT_MONO, fontWeight: 700, color: C.text }}>{clkLabel}</span></span>
+                  <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={endSession}><Square size={15} strokeWidth={2.4} fill="#fff" /> Encerrar</button>
+                </div>
+                {recOn && <div style={S.recRow}><span className="neon-pulse" style={S.recDot} /> Gravando áudio… (o arquivo é baixado ao encerrar)</div>}
+                {recError && <div style={S.recWarn}>{recError}</div>}
+              </>
+            ) : (
+              <div style={S.sessionRow}>
+                <input className="palco-input" style={{ ...S.input, flex: 1, minWidth: 160 }} value={sessionName} onChange={(e) => setSessionName(e.target.value)} placeholder="Nome da apresentação (ex: Bar do Zé)" onKeyDown={(e) => { if (e.key === "Enter") startSession(); }} />
+                <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={startSession}><Play size={16} strokeWidth={2.4} fill="#fff" /> Iniciar</button>
+              </div>
+            )}
+            <p style={S.sessionHint}>Ao iniciar, o cronômetro aparece nas telas e o <strong>áudio é gravado pelo microfone</strong>. Ao encerrar, o setlist e os tempos ficam em <strong>Sessões</strong> e a <strong>gravação é baixada</strong>. (Gravar precisa de https + permissão do microfone.)</p>
+          </div>
         </div>
         {renameModal}
         {coverModal}
@@ -2237,7 +2271,34 @@ function ChordDiagram({ frets }) {
 }
 
 /* ----------------------------- afinador --------------------------- */
-function Tuner({ onClose }) {
+// agulha analógica longa (estilo app de afinador): mostra o desvio em cents num arco
+function TunerGauge({ note, cents, color }) {
+  const cx = 150, cy = 190, L = 156;
+  const clamped = Math.max(-50, Math.min(50, cents || 0));
+  const ang = (clamped / 50) * 48; // graus a partir da vertical
+  const rad = (a) => (a * Math.PI) / 180;
+  const tipX = cx + L * Math.sin(rad(ang)), tipY = cy - L * Math.cos(rad(ang));
+  const ticks = [];
+  for (let c = -50; c <= 50; c += 5) {
+    const a = (c / 50) * 48, major = c % 25 === 0, zero = c === 0;
+    const Ro = 176, Ri = major ? 148 : 162;
+    ticks.push({ x1: cx + Ri * Math.sin(rad(a)), y1: cy - Ri * Math.cos(rad(a)), x2: cx + Ro * Math.sin(rad(a)), y2: cy - Ro * Math.cos(rad(a)), major, zero });
+  }
+  return (
+    <svg viewBox="0 0 300 205" style={{ width: "100%", maxWidth: 360, display: "block", margin: "2px auto 0" }}>
+      {ticks.map((t, i) => (
+        <line key={i} x1={t.x1} y1={t.y1} x2={t.x2} y2={t.y2} stroke={t.zero ? C.green : "rgba(255,255,255,.22)"} strokeWidth={t.zero ? 3 : t.major ? 2.2 : 1.3} strokeLinecap="round" />
+      ))}
+      <text x="8" y="150" fill={C.textFaint} fontSize="22" fontWeight="700">♭</text>
+      <text x="276" y="150" fill={C.textFaint} fontSize="22" fontWeight="700">♯</text>
+      <line x1={cx} y1={cy} x2={tipX} y2={tipY} stroke={color} strokeWidth={3.2} strokeLinecap="round" style={{ transition: "all .09s linear" }} />
+      <circle cx={cx} cy={cy} r={9} fill={color} />
+      <circle cx={cx} cy={cy} r={16} fill="none" stroke={color} strokeWidth={2} opacity={0.35} />
+    </svg>
+  );
+}
+
+function Tuner({ onClose, inline }) {
   const [state, setState] = useState("idle"); // idle | listening | denied | unsupported
   const [note, setNote] = useState(null); // {name, octave, cents}
   const ctxRef = useRef(null), streamRef = useRef(null), rafRef = useRef(null);
@@ -2247,27 +2308,42 @@ function Tuner({ onClose }) {
     if (streamRef.current) streamRef.current.getTracks().forEach((t) => t.stop());
     if (ctxRef.current && ctxRef.current.state !== "closed") ctxRef.current.close();
   };
+  const stopListening = () => { stop(); rafRef.current = null; streamRef.current = null; ctxRef.current = null; setNote(null); setState("idle"); };
   useEffect(() => () => stop(), []);
 
   const start = async () => {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { setState("unsupported"); return; }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      try { localStorage.setItem("mystage_mic_ok", "1"); } catch (e) {} // lembra que já autorizou
       streamRef.current = stream;
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       ctxRef.current = ctx;
       const src = ctx.createMediaStreamSource(stream);
-      const analyser = ctx.createAnalyser(); analyser.fftSize = 2048;
+      const analyser = ctx.createAnalyser(); analyser.fftSize = 4096;
       src.connect(analyser);
       const buf = new Float32Array(analyser.fftSize);
       setState("listening");
-      let lastT = 0;
+      let lastT = 0, lastGood = 0, ema = null, lastName = null;
+      const hist = [];
       const loop = (t) => {
         rafRef.current = requestAnimationFrame(loop);
-        if (t - lastT < 80) return; lastT = t;
+        if (t - lastT < 55) return; lastT = t;
         analyser.getFloatTimeDomainData(buf);
         const freq = autoCorrelate(buf, ctx.sampleRate);
-        if (freq > 0) setNote(freqToNote(freq));
+        if (freq > 0 && freq >= 55 && freq <= 1400) {
+          if (t - lastGood > 500) { hist.length = 0; ema = null; lastName = null; } // recomeça após silêncio
+          lastGood = t;
+          hist.push(freq); if (hist.length > 7) hist.shift();
+          const sorted = [...hist].sort((a, b) => a - b);
+          const med = sorted[sorted.length >> 1];
+          const good = hist.filter((x) => Math.abs(1200 * Math.log2(x / med)) < 55); // descarta erros de oitava/ruído
+          const avg = good.reduce((s, x) => s + x, 0) / good.length;
+          const n = freqToNote(avg);
+          if (n.name !== lastName) { ema = n.cents; lastName = n.name; }            // troca de nota: reinicia a suavização
+          else ema = ema == null ? n.cents : ema + (n.cents - ema) * 0.25;          // suaviza os cents → agulha estável
+          setNote({ name: n.name, octave: n.octave, cents: Math.round(ema), hz: Math.round(avg * 10) / 10 });
+        }
       };
       rafRef.current = requestAnimationFrame(loop);
     } catch (e) { setState("denied"); }
@@ -2276,6 +2352,33 @@ function Tuner({ onClose }) {
   const cents = note ? note.cents : 0;
   const inTune = note && Math.abs(cents) <= 5;
   const color = !note ? C.textFaint : inTune ? C.green : Math.abs(cents) <= 15 ? C.amber : C.red;
+
+  if (inline) {
+    const active = state === "listening";
+    return (
+      <div style={active ? S.tunerSection : S.tunerSectionSlim}>
+        <div style={{ ...S.sectionHead, marginBottom: active ? 10 : 0 }}>
+          <Mic size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Afinador</span>
+          {active
+            ? <button className="palco-btn palco-ghost" style={{ ...S.iconGhost, marginLeft: "auto", color: C.textDim }} onClick={stopListening} title="Parar afinador"><Square size={14} strokeWidth={2.3} /> Parar</button>
+            : <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, marginLeft: "auto" }} onClick={start}><Mic size={16} strokeWidth={2.2} /> Afinar</button>}
+        </div>
+        {active && (
+          <div style={S.tunerBody}>
+            <div style={{ ...S.tunerNote, color }}>{note ? note.name : "—"}<span style={S.tunerOct}>{note ? note.octave : ""}</span></div>
+            <div style={S.tunerHz}>{note ? (note.hz ? `${note.hz.toFixed(1)} Hz` : " ") : "Toque a corda"}</div>
+            <TunerGauge note={note} cents={cents} color={color} />
+            <div style={S.tunerReadout}>{note ? (inTune ? <span style={{ color: C.green, fontWeight: 800 }}>{"✓ afinado"}</span> : <span style={{ color, fontWeight: 800 }}>{cents > 0 ? "+" : ""}{cents} cents {"·"} {cents > 0 ? "afrouxe a corda" : "aperte a corda"}</span>) : "ouvindo..."}</div>
+            <div style={S.tunerStrip}>{SHARP.map((nm) => (<span key={nm} style={{ ...S.tunerStripNote, color: note && note.name === nm ? color : C.textFaint, fontWeight: note && note.name === nm ? 800 : 500, transform: note && note.name === nm ? "scale(1.25)" : "none" }}>{nm}</span>))}</div>
+            <p style={S.tunerFine}>{"Cordas (padrão): E2 · A2 · D3 · G3 · B3 · E4"}</p>
+          </div>
+        )}
+        {(state === "denied" || state === "unsupported") && (
+          <p style={{ ...S.tunerFine, marginTop: 8 }}>{state === "denied" ? "Microfone bloqueado. Autorize o acesso nas permissões do navegador e toque em Afinar de novo." : "Este navegador não dá acesso ao microfone aqui. Hospede em https para usar o afinador."}</p>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div style={S.tunerOverlay} onClick={onClose}>
@@ -2299,11 +2402,9 @@ function Tuner({ onClose }) {
         {state === "listening" && (
           <div style={S.tunerBody}>
             <div style={{ ...S.tunerNote, color }}>{note ? note.name : "—"}<span style={S.tunerOct}>{note ? note.octave : ""}</span></div>
-            <div style={S.tunerMeter}>
-              <div style={S.tunerCenter} />
-              <div style={{ ...S.tunerNeedle, left: `calc(50% + ${Math.max(-50, Math.min(50, cents)) * 0.9}%)`, background: color }} />
-            </div>
-            <div style={S.tunerScale}><span>♭ baixo</span><span style={{ color: inTune ? C.green : C.textFaint, fontWeight: 600 }}>{note ? (inTune ? "afinado" : `${cents > 0 ? "+" : ""}${cents}`) : "ouvindo…"}</span><span>alto ♯</span></div>
+            <div style={S.tunerHz}>{note && note.hz ? `${note.hz.toFixed(1)} Hz` : " "}</div>
+            <TunerGauge note={note} cents={cents} color={color} />
+            <div style={S.tunerScale}><span>♭ baixo</span><span style={{ color: inTune ? C.green : C.textFaint, fontWeight: 700 }}>{note ? (inTune ? "✓ afinado" : `${cents > 0 ? "+" : ""}${cents}¢`) : "ouvindo…"}</span><span>alto ♯</span></div>
             <p style={S.tunerFine}>Cordas (padrão): E2 · A2 · D3 · G3 · B3 · E4</p>
           </div>
         )}
@@ -2454,10 +2555,16 @@ const S = {
   tunerCard: { width: "100%", maxWidth: 380, background: C.surface, border: `1px solid ${C.border}`, borderRadius: 20, padding: 20, boxShadow: "0 24px 70px rgba(0,0,0,.6)" },
   tunerHead: { display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 8 },
   tunerTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, color: C.text },
+  tunerSection: { background: `linear-gradient(160deg, ${C.surface}, ${C.surface2})`, border: `1px solid ${C.border}`, borderRadius: 16, padding: "14px 16px 12px", marginBottom: 18, boxShadow: "0 8px 26px rgba(0,0,0,.28)" },
+  tunerSectionSlim: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 14px", marginBottom: 18 },
+  tunerReadout: { fontSize: 15, color: C.textDim, minHeight: 20, marginTop: -2 },
+  tunerStrip: { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "6px 12px", width: "100%", maxWidth: 340, fontFamily: FONT_MONO, fontSize: 14 },
+  tunerStripNote: { transition: "all .12s ease", minWidth: 20 },
   tunerBody: { display: "flex", flexDirection: "column", alignItems: "center", gap: 14, padding: "18px 6px 6px", textAlign: "center" },
   tunerMsg: { fontSize: 14, color: C.textDim, lineHeight: 1.55, margin: 0, maxWidth: 300 },
   tunerFine: { fontSize: 11.5, color: C.textFaint, lineHeight: 1.5, margin: 0, maxWidth: 320 },
   tunerNote: { fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 76, lineHeight: 1 },
+  tunerHz: { fontFamily: FONT_MONO, fontSize: 13, color: C.textFaint, marginTop: 2, minHeight: 17 },
   tunerOct: { fontSize: 22, marginLeft: 4, opacity: 0.7 },
   tunerMeter: { position: "relative", width: "100%", height: 10, background: C.surface2, borderRadius: 99, overflow: "hidden" },
   tunerCenter: { position: "absolute", left: "50%", top: -3, width: 2, height: 16, background: C.textFaint, transform: "translateX(-50%)" },
@@ -2513,7 +2620,8 @@ const S = {
   stageClockBtn: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textDim, border: "none", borderRadius: 6, cursor: "pointer", flexShrink: 0 },
   recBadgeFixed: { position: "fixed", top: "calc(env(safe-area-inset-top) + 6px)", right: "calc(env(safe-area-inset-right) + 10px)", zIndex: 56, display: "flex", alignItems: "center", gap: 6, background: C.red, color: "#fff", borderRadius: 99, padding: "4px 6px 4px 11px", boxShadow: "0 4px 16px rgba(0,0,0,.45)", fontFamily: FONT_UI, fontSize: 12.5 },
   recBadgeBtn: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,.18)", color: "#fff", border: "none", borderRadius: 999, cursor: "pointer", flexShrink: 0 },
-  recPreview: { position: "fixed", bottom: "calc(env(safe-area-inset-bottom) + 12px)", right: "calc(env(safe-area-inset-right) + 12px)", width: 116, height: 154, objectFit: "cover", borderRadius: 12, border: `2px solid ${C.red}`, boxShadow: "0 6px 20px rgba(0,0,0,.5)", zIndex: 56, transform: "scaleX(-1)", background: "#000" },
+  recPreviewWrap: { position: "fixed", width: 84, height: 112, borderRadius: 12, border: `2px solid ${C.red}`, boxShadow: "0 6px 20px rgba(0,0,0,.5)", zIndex: 57, background: "#000", overflow: "hidden", cursor: "grab", touchAction: "none" },
+  recPreview: { width: "100%", height: "100%", objectFit: "cover", transform: "scaleX(-1)", display: "block", pointerEvents: "none" },
   sessionDot: { width: 8, height: 8, borderRadius: "50%", background: C.red, flexShrink: 0 },
   sessionPillName: { fontSize: 12, fontWeight: 600, color: C.amber, maxWidth: 130, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
   sessionCard: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 18, display: "flex", flexDirection: "column", gap: 10 },
