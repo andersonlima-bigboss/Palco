@@ -71,7 +71,7 @@ const inlinePlugin = {
 const options = {
   entryPoints: ["src/main.jsx"],
   bundle: true, minify: true, format: "iife",
-  define: { "process.env.NODE_ENV": '"production"', "__BUILD__": JSON.stringify(new Date().toISOString().slice(0, 16).replace("T", " ")) },
+  define: { "process.env.NODE_ENV": '"production"', "__BUILD__": JSON.stringify((() => { const d = new Date(), p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; })()) },
   outfile: "dist/app.js", write: false,
   loader: { ".jsx": "jsx" },
   plugins: [inlinePlugin],

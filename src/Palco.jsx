@@ -710,6 +710,7 @@ export default function Palco() {
   const [capo, setCapo] = useState(0);
   const [popovers, setPopovers] = useState([]); // [{ id, name, x, y }] — vários, arrastáveis e fixos
   const [tunerOpen, setTunerOpen] = useState(false);
+  const [metroOpen, setMetroOpen] = useState(false);
 
   // ----- Modo Karaokê (a cifra segue o tempo do áudio) -----
   const [mode, setMode] = useState("free");                       // "free" | "karaoke"
@@ -1883,7 +1884,6 @@ export default function Palco() {
           </div>
 
           <Tuner inline />
-          <Metronome />
           <button className="palco-btn" style={S.chordLibEntry} onClick={() => setView("chords")}><Music size={16} color={C.amber} strokeWidth={2.2} /><span style={{ fontWeight: 600 }}>Biblioteca de acordes</span><span style={{ marginLeft: "auto", color: C.textFaint, fontSize: 18 }}>›</span></button>
 
           <div style={S.setlistHome}>
@@ -2179,6 +2179,7 @@ export default function Palco() {
                   </div>
                   <button className="palco-btn" style={hideTabs ? S.tabToggleOn : S.tabToggle} onClick={() => setHideTabs((v) => !v)} title={hideTabs ? "Mostrar solos e tablaturas" : "Ocultar solos/tablaturas (só letra e acordes)"}>{hideTabs ? <Eye size={15} strokeWidth={2.1} /> : <EyeOff size={15} strokeWidth={2.1} />} Solos</button>
                   {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerIcon} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={16} strokeWidth={2.1} /></button>}
+                  {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerIcon} onClick={() => setMetroOpen(true)} title="Metrônomo"><Timer size={16} strokeWidth={2.1} /></button>}
                   {recOn ? (
                     <button className="palco-btn" style={S.recBtnOn} onClick={() => stopRecordingAndSave(selectedSong?.title || (session && session.name) || "cifra")} title="Parar e salvar gravação">{recKind === "video" ? <Video size={14} strokeWidth={2.2} /> : <Square size={14} strokeWidth={2.4} fill="#fff" />} <span style={{ fontFamily: FONT_MONO, fontWeight: 700 }}>{fmtMMSS(recSec)}</span> ■</button>
                   ) : (<>
@@ -2314,6 +2315,7 @@ export default function Palco() {
       {popovers.map((p) => <ChordPopover key={p.id} data={p} onClose={() => closePopover(p.id)} onMove={(x, y) => movePopover(p.id, x, y)} />)}
       {popovers.length >= 1 && <button className="palco-btn palco-ghost neon" style={S.popClearAll} onClick={() => setPopovers([])}><EyeOff size={15} strokeWidth={2.3} /> Ocultar acordes ({popovers.length})</button>}
       {tunerOpen && <Tuner onClose={() => setTunerOpen(false)} />}
+      {metroOpen && <Metronome onClose={() => setMetroOpen(false)} />}
       {renameModal}
     </div>
   );
@@ -2663,7 +2665,7 @@ function Tuner({ onClose, inline }) {
 }
 
 /* ---------------------------- metrônomo --------------------------- */
-function Metronome() {
+function Metronome({ onClose }) {
   const [playing, setPlaying] = useState(false);
   const [bpm, setBpm] = useState(100);
   const [beats, setBeats] = useState(4);
@@ -2708,31 +2710,27 @@ function Metronome() {
   };
   const setB = (v) => setBpm(Math.max(30, Math.min(300, v)));
   return (
-    <div style={S.tunerSectionSlim}>
-      <div style={{ ...S.sectionHead, marginBottom: playing ? 12 : 0 }}>
-        <Timer size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Metrônomo</span>
-        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: C.text }}>{bpm}<span style={{ fontSize: 11, color: C.textFaint }}> BPM</span></span>
-          <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, padding: "8px 14px", background: playing ? C.red : C.amberDeep, color: playing ? "#fff" : "#1a140a" }} onClick={() => (playing ? stop() : start())}>{playing ? <><Square size={14} strokeWidth={2.4} fill="#fff" /> Parar</> : <><Play size={15} strokeWidth={2.4} fill="#1a140a" /> Iniciar</>}</button>
-        </span>
-      </div>
-      {playing && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "center" }}>
-          <div style={{ display: "flex", gap: 8 }}>
-            {Array.from({ length: beats }).map((_, i) => <span key={i} style={{ width: i === 0 ? 15 : 12, height: i === 0 ? 15 : 12, borderRadius: "50%", background: cur === i ? (i === 0 ? C.amber : C.green) : C.surface2, border: `1px solid ${cur === i ? "transparent" : C.borderSoft}`, transition: "background .05s" }} />)}
+    <div style={S.tunerOverlay} onClick={() => { stop(); onClose && onClose(); }}>
+      <div style={S.tunerCard} onClick={(e) => e.stopPropagation()}>
+        <div style={S.tunerHead}><div style={{ display: "flex", alignItems: "center", gap: 9 }}><Timer size={18} color={C.amber} strokeWidth={2.2} /><span style={S.tunerTitle}>Metrônomo</span></div><button className="palco-btn palco-icon" style={S.popClose} onClick={() => { stop(); onClose && onClose(); }}><X size={16} strokeWidth={2.3} /></button></div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 16, alignItems: "center", padding: "16px 4px 6px" }}>
+          <div style={{ fontFamily: FONT_MONO, fontSize: 46, fontWeight: 700, color: C.text, lineHeight: 1 }}>{bpm}<span style={{ fontSize: 15, color: C.textFaint, fontWeight: 600 }}> BPM</span></div>
+          <div style={{ display: "flex", gap: 9 }}>
+            {Array.from({ length: beats }).map((_, i) => <span key={i} style={{ width: i === 0 ? 16 : 13, height: i === 0 ? 16 : 13, borderRadius: "50%", background: playing && cur === i ? (i === 0 ? C.amber : C.green) : C.surface2, border: `1px solid ${playing && cur === i ? "transparent" : C.borderSoft}`, transition: "background .05s" }} />)}
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <button className="palco-btn palco-icon" style={S.toolReset} onClick={() => setB(bpm - 5)}><Minus size={15} strokeWidth={2.5} /></button>
-            <input className="palco-range" type="range" min={40} max={240} step={1} value={bpm} onChange={(e) => setB(Number(e.target.value))} style={{ width: 150 }} />
+            <input className="palco-range" type="range" min={40} max={240} step={1} value={bpm} onChange={(e) => setB(Number(e.target.value))} style={{ width: 180 }} />
             <button className="palco-btn palco-icon" style={S.toolReset} onClick={() => setB(bpm + 5)}><Plus size={15} strokeWidth={2.5} /></button>
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "center" }}>
             <span style={S.toolLabel}>Compasso</span>
             {[2, 3, 4, 6].map((n) => <button key={n} className="palco-btn" style={n === beats ? S.segActive : S.seg} onClick={() => setBeats(n)}>{n}/4</button>)}
             <button className="palco-btn" style={S.tabToggle} onClick={tap} title="Toque no ritmo para definir o BPM"><Circle size={12} strokeWidth={0} fill={C.amber} /> Bater</button>
           </div>
+          <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, justifyContent: "center", width: "100%", background: playing ? C.red : C.amberDeep, color: playing ? "#fff" : "#1a140a" }} onClick={() => (playing ? stop() : start())}>{playing ? <><Square size={16} strokeWidth={2.4} fill="#fff" /> Parar</> : <><Play size={17} strokeWidth={2.4} fill="#1a140a" /> Iniciar</>}</button>
         </div>
-      )}
+      </div>
     </div>
   );
 }
