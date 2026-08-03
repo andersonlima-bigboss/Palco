@@ -3,7 +3,7 @@ import {
   Play, Pause, ArrowLeft, ChevronLeft, Music2, ListMusic, Plus, Minus,
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
   Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
-  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Circle, Video, MoreHorizontal, Sparkles, Music, Timer, Image as ImageIcon,
+  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Circle, Video, MoreHorizontal, Sparkles, Music, Timer, Link as LinkIcon, Image as ImageIcon,
   RotateCw, GripVertical, Eye, EyeOff, ChevronRight,
 } from "lucide-react";
 import DEFAULT_LIBRARY from "./defaultLibrary.json";
@@ -687,6 +687,8 @@ export default function Palco() {
   const [selected, setSelected] = useState(null);
 
   const [raw, setRaw] = useState("");
+  const [linkUrl, setLinkUrl] = useState("");                      // importar de um link público
+  const [linkBusy, setLinkBusy] = useState(false);
   const [preview, setPreview] = useState(null);
   const [albumName, setAlbumName] = useState("");
   const [importErr, setImportErr] = useState("");
@@ -1108,6 +1110,30 @@ export default function Palco() {
     }
     setPdfBusy(false);
     if (pdfInputRef.current) pdfInputRef.current.value = "";
+  };
+  const normalizeLink = (u) => {
+    u = (u || "").trim();
+    if (/github\.com\/.+\/blob\//.test(u)) return u.replace("github.com", "raw.githubusercontent.com").replace("/blob/", "/");
+    if (/dropbox\.com/.test(u)) return u.includes("dl=") ? u.replace(/dl=0/, "dl=1") : u + (u.includes("?") ? "&" : "?") + "dl=1";
+    return u;
+  };
+  const importFromLink = async () => {
+    const url = normalizeLink(linkUrl);
+    if (!/^https?:\/\//i.test(url)) { setImportErr("Cole um link http(s) válido para um arquivo de texto."); return; }
+    setLinkBusy(true); setImportErr(""); setPreview(null);
+    try {
+      const res = await fetch(url);
+      if (!res.ok) throw new Error("http " + res.status);
+      const text = await res.text();
+      if (!text.trim()) throw new Error("vazio");
+      setRaw(text);
+      const parsed = parseSongs(text);
+      if (!parsed.length) setImportErr("Baixei o arquivo, mas não achei cifras no formato esperado (use 'Título:' e '---' entre as músicas).");
+      else { setPreview(parsed); if (!albumName.trim()) setAlbumName(`Álbum ${library.albums.length + 1}`); }
+    } catch (err) {
+      setImportErr("Não consegui baixar esse link (provável bloqueio de CORS do site). Funciona bem com GitHub Gist (botão Raw), GitHub raw e Dropbox. Google Drive não abre por link direto.");
+    }
+    setLinkBusy(false);
   };
   const processImport = () => {
     const parsed = parseSongs(raw);
@@ -2060,8 +2086,13 @@ export default function Palco() {
               <input ref={pdfInputRef} type="file" accept="application/pdf,.pdf" onChange={onPdfFile} style={{ display: "none" }} />
               <div style={S.importPdfRow}>
                 <button className="palco-btn palco-ghost neon" style={{ ...S.btnGhost, opacity: pdfBusy ? 0.6 : 1 }} onClick={() => pdfInputRef.current && pdfInputRef.current.click()} disabled={pdfBusy}><Upload size={17} strokeWidth={2} /> {pdfBusy ? "Lendo PDF…" : "Subir PDF (CifraClub)"}</button>
-                <span style={S.importPdfHint}>ou cole o texto abaixo</span>
+                <span style={S.importPdfHint}>ou importe de um link / cole abaixo</span>
               </div>
+              <div style={S.importLinkRow}>
+                <input className="palco-input" style={{ ...S.input, flex: 1, minWidth: 170 }} value={linkUrl} onChange={(e) => setLinkUrl(e.target.value)} placeholder="Cole um link .txt (GitHub Gist raw, Dropbox…)" onKeyDown={(e) => { if (e.key === "Enter") importFromLink(); }} />
+                <button className="palco-btn palco-ghost" style={{ ...S.btnGhost, opacity: linkBusy || !linkUrl.trim() ? 0.5 : 1 }} onClick={importFromLink} disabled={linkBusy || !linkUrl.trim()}><LinkIcon size={16} strokeWidth={2.1} /> {linkBusy ? "Baixando…" : "Importar link"}</button>
+              </div>
+              <p style={S.importLinkHint}>Guarde suas cifras num arquivo <code style={S.code}>.txt</code> (com <code style={S.code}>Título:</code> e <code style={S.code}>---</code> entre as músicas) no seu Drive/Dropbox/GitHub e cole o link público aqui. Cada um é responsável pelas próprias cifras.</p>
               <textarea className="palco-textarea" value={raw} onChange={(e) => setRaw(e.target.value)} placeholder={"Cole o álbum aqui…\n\nTítulo: Minha música\n[Intro] C  G  Am  F\n\nC           G\nLetra..."} style={S.textarea} spellCheck={false} />
               {importErr && <div style={S.errorBox}>{importErr}</div>}
               <div style={S.importActions}>
@@ -2796,6 +2827,8 @@ const S = {
   importActions: { display: "flex", gap: 12, marginTop: 18, flexWrap: "wrap" },
   importPdfRow: { display: "flex", alignItems: "center", gap: 12, marginTop: 18, flexWrap: "wrap" },
   importPdfHint: { fontSize: 13, color: C.textFaint },
+  importLinkRow: { display: "flex", alignItems: "center", gap: 10, marginTop: 10, flexWrap: "wrap" },
+  importLinkHint: { fontSize: 12, color: C.textFaint, lineHeight: 1.5, marginTop: 8 },
   btnPrimary: { display: "inline-flex", alignItems: "center", gap: 9, background: C.amberDeep, color: "#1a140a", border: "none", borderRadius: 11, padding: "13px 22px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 15, cursor: "pointer" },
   btnGhost: { display: "inline-flex", alignItems: "center", gap: 8, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 11, padding: "13px 18px", fontFamily: FONT_UI, fontWeight: 500, fontSize: 14, cursor: "pointer" },
   previewHead: { display: "flex", alignItems: "center", gap: 8, marginTop: 24, marginBottom: 12, fontFamily: FONT_UI, fontWeight: 600, fontSize: 15, color: C.text },
