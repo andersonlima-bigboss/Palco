@@ -3,7 +3,7 @@ import {
   Play, Pause, ArrowLeft, ChevronLeft, Music2, ListMusic, Plus, Minus,
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
   Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
-  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Circle, Video, MoreHorizontal, Image as ImageIcon,
+  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Circle, Video, MoreHorizontal, Sparkles, Music, Timer, Image as ImageIcon,
   RotateCw, GripVertical, Eye, EyeOff, ChevronRight,
 } from "lucide-react";
 import DEFAULT_LIBRARY from "./defaultLibrary.json";
@@ -360,6 +360,22 @@ function shiftNote(note, semis, preferFlat) {
   const ni = (((idx + semis) % 12) + 12) % 12;
   return (preferFlat ? FLAT : SHARP)[ni];
 }
+// simplifica um acorde para a tríade básica (maior/menor), preservando o baixo do slash
+function simplifyChord(tok) {
+  const open = tok.startsWith("(") ? "(" : "", close = tok.endsWith(")") ? ")" : "";
+  let core = tok.slice(open.length, tok.length - close.length);
+  let main = core, bass = ""; const sl = core.indexOf("/");
+  if (sl !== -1) { main = core.slice(0, sl); bass = core.slice(sl + 1); }
+  const rm = main.match(/^([A-G][#b]?)(.*)$/); if (!rm) return tok;
+  const s = rm[2];
+  let q = "";
+  if (/^(m|min)(?!aj)/.test(s)) q = "m";            // menor (m, m7, m9...) → m
+  else if (/^(dim|°|º|ø)/.test(s)) q = "m";          // diminuto → menor (aproxima)
+  // maj, maj7, 7, 6, 9, sus, add, aug, números → tríade maior (vazio)
+  let out = open + rm[1] + q;
+  if (bass) out += "/" + bass;                       // mantém o baixo para preservar a linha
+  return out + close;
+}
 function transposeToken(tok, semis) {
   if (!semis) return tok;
   const open = tok.startsWith("(") ? "(" : "", close = tok.endsWith(")") ? ")" : "";
@@ -684,6 +700,9 @@ export default function Palco() {
   const [fontSize, setFontSize] = useState(18);
   const [autoFit, setAutoFit] = useState(true);
   const [hideTabs, setHideTabs] = useState(false);                 // ocultar solos/tablaturas (só letra + acordes)
+  const [simplify, setSimplify] = useState(false);                 // simplificar acordes (tríades básicas)
+  const [chordRoot, setChordRoot] = useState("C");                 // biblioteca de acordes: tônica
+  const [chordQual, setChordQual] = useState("");                  // biblioteca de acordes: qualidade (sufixo)
   const [containerW, setContainerW] = useState(0);
   const [isMobile, setIsMobile] = useState(false);
 
@@ -1864,6 +1883,8 @@ export default function Palco() {
           </div>
 
           <Tuner inline />
+          <Metronome />
+          <button className="palco-btn" style={S.chordLibEntry} onClick={() => setView("chords")}><Music size={16} color={C.amber} strokeWidth={2.2} /><span style={{ fontWeight: 600 }}>Biblioteca de acordes</span><span style={{ marginLeft: "auto", color: C.textFaint, fontSize: 18 }}>›</span></button>
 
           <div style={S.setlistHome}>
             <div style={S.sectionHead}><ListMusic size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Setlists</span><button className="palco-btn palco-ghost" style={{ ...S.iconGhost, marginLeft: "auto" }} onClick={newSetlist}><Plus size={15} strokeWidth={2.4} /> Criar setlist</button></div>
@@ -1982,6 +2003,43 @@ export default function Palco() {
             </div>
           </div>
         )}
+      </div>
+    );
+  }
+
+  /* ----------------------- BIBLIOTECA DE ACORDES -------------------- */
+  if (view === "chords") {
+    const QUALS = [
+      { label: "Maior", suf: "" }, { label: "Menor", suf: "m" }, { label: "7", suf: "7" }, { label: "m7", suf: "m7" },
+      { label: "Maj7", suf: "maj7" }, { label: "6", suf: "6" }, { label: "sus4", suf: "sus4" }, { label: "sus2", suf: "sus2" },
+      { label: "9", suf: "9" }, { label: "dim", suf: "dim" }, { label: "aug", suf: "aug" }, { label: "add9", suf: "add9" },
+    ];
+    const chName = chordRoot + chordQual;
+    let voicings = chordVariations(chName);
+    if (!voicings.length) { const d = chordDiagram(chName); if (d) voicings = [{ frets: d.frets, approx: d.approx }]; }
+    return (
+      <div className="palco-root" style={S.page}>
+        <style>{CSS}</style>
+        <div style={S.glow} />
+        {overlays}
+        <div className="palco-scroll" style={S.importWrap}>
+          <button className="palco-btn palco-icon" style={S.importBack} onClick={() => setView("albums")}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Início</span></button>
+          <h1 style={S.importTitle}>Biblioteca de acordes</h1>
+          <p style={S.tagline}>Escolha a tônica e a qualidade para ver as formas no braço (violão · destro). Toque num acorde da cifra também abre o diagrama.</p>
+          <div style={S.chordPickRow}>{SHARP.map((n) => <button key={n} className="palco-btn" style={n === chordRoot ? S.chordPickOn : S.chordPick} onClick={() => setChordRoot(n)}>{n}</button>)}</div>
+          <div style={{ ...S.chordPickRow, marginTop: 8 }}>{QUALS.map((q) => <button key={q.suf} className="palco-btn" style={q.suf === chordQual ? S.chordPickOn : S.chordPick} onClick={() => setChordQual(q.suf)}>{q.label}</button>)}</div>
+          <div style={S.chordLibTitle}>{chName}{voicings[0] && voicings[0].approx ? <span style={{ fontSize: 13, color: C.textFaint, fontWeight: 500 }}> · forma aproximada</span> : null}</div>
+          {voicings.length ? (
+            <div style={S.chordGrid}>
+              {voicings.slice(0, 6).map((v, i) => (
+                <div key={i} style={S.chordCard}>
+                  <ChordDiagram frets={v.frets} />
+                  <div style={S.chordCardLabel}>{i === 0 ? "posição base" : `posição ${i + 1}`}</div>
+                </div>
+              ))}
+            </div>
+          ) : <p style={S.tunerMsg}>Diagrama indisponível para esse acorde.</p>}
+        </div>
       </div>
     );
   }
@@ -2120,6 +2178,7 @@ export default function Palco() {
                     <button className="palco-btn" style={mode === "karaoke" ? S.segActive : S.seg} onClick={() => switchMode("karaoke")}>Karaokê</button>
                   </div>
                   <button className="palco-btn" style={hideTabs ? S.tabToggleOn : S.tabToggle} onClick={() => setHideTabs((v) => !v)} title={hideTabs ? "Mostrar solos e tablaturas" : "Ocultar solos/tablaturas (só letra e acordes)"}>{hideTabs ? <Eye size={15} strokeWidth={2.1} /> : <EyeOff size={15} strokeWidth={2.1} />} Solos</button>
+                  <button className="palco-btn" style={simplify ? S.tabToggleOn : S.tabToggle} onClick={() => setSimplify((v) => !v)} title={simplify ? "Mostrar acordes originais" : "Simplificar acordes (tríades fáceis)"}><Sparkles size={15} strokeWidth={2.1} /> Fácil</button>
                   {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerIcon} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={16} strokeWidth={2.1} /></button>}
                   {recOn ? (
                     <button className="palco-btn" style={S.recBtnOn} onClick={() => stopRecordingAndSave(selectedSong?.title || (session && session.name) || "cifra")} title="Parar e salvar gravação">{recKind === "video" ? <Video size={14} strokeWidth={2.2} /> : <Square size={14} strokeWidth={2.4} fill="#fff" />} <span style={{ fontFamily: FONT_MONO, fontWeight: 700 }}>{fmtMMSS(recSec)}</span> ■</button>
@@ -2161,7 +2220,7 @@ export default function Palco() {
                         return baseLines.map((ln) => {
                           if (ln.kind === "blank") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ height: effFs * 0.7 }} />;
                           if (ln.kind === "section") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.teal, fontWeight: 600, whiteSpace: "pre" }}>{ln.text}</div>;
-                          if (ln.kind === "chord") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.amber, fontWeight: 700, letterSpacing: "0.04em", whiteSpace: "pre" }}>{renderChordLine(ln.text, displayShift, onChordTap)}</div>;
+                          if (ln.kind === "chord") return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.amber, fontWeight: 700, letterSpacing: "0.04em", whiteSpace: "pre" }}>{renderChordLine(ln.text, displayShift, onChordTap, simplify)}</div>;
                           if (kON && karSync.wordsByLine[ln.key]) return <div key={ln.key} ref={setRef(ln.key)} style={{ whiteSpace: "pre" }}>{renderKaraokeLyric(ln.text, karSync.wordsByLine[ln.key], kar.time, ln.key, activeKey)}</div>;
                           return <div key={ln.key} ref={kON ? setRef(ln.key) : undefined} style={{ color: C.text, whiteSpace: "pre" }}>{ln.text || " "}</div>;
                         });
@@ -2262,7 +2321,7 @@ export default function Palco() {
 }
 
 /* ------------------ render de linha de acordes -------------------- */
-function renderChordLine(text, shift, onChordTap) {
+function renderChordLine(text, shift, onChordTap, simplify) {
   const parts = []; const re = /(\s+)|(\S+)/g; let m;
   while ((m = re.exec(text))) parts.push(m[1] !== undefined ? { g: m[1] } : { t: m[2] });
   const nodes = [];
@@ -2270,20 +2329,18 @@ function renderChordLine(text, shift, onChordTap) {
     const p = parts[i];
     if (p.g !== undefined) { nodes.push(<span key={i}>{p.g}</span>); continue; }
     const tok = p.t; const isChord = CHORD_RE.test(tok);
-    if (isChord && shift) {
-      const nt = transposeToken(tok, shift); const diff = tok.length - nt.length;
-      if (i + 1 < parts.length && parts[i + 1].g !== undefined) {
-        let g = parts[i + 1].g;
-        if (diff > 0) g = g + " ".repeat(diff); else if (diff < 0) g = g.slice(0, Math.max(1, g.length + diff));
-        parts[i + 1] = { g };
-      }
-      nodes.push(<span key={i} className="palco-chord" onClick={(e) => onChordTap(nt, e)}>{nt}</span>);
-      if ((i + 1 >= parts.length || parts[i + 1].g === undefined) && diff > 0) nodes.push(<span key={i + "p"}>{" ".repeat(diff)}</span>);
-    } else if (isChord) {
-      nodes.push(<span key={i} className="palco-chord" onClick={(e) => onChordTap(tok, e)}>{tok}</span>);
-    } else {
-      nodes.push(<span key={i}>{tok}</span>);
+    if (!isChord) { nodes.push(<span key={i}>{tok}</span>); continue; }
+    let nt = tok;
+    if (shift) nt = transposeToken(nt, shift);
+    if (simplify) nt = simplifyChord(nt);
+    const diff = tok.length - nt.length;
+    if (diff !== 0 && i + 1 < parts.length && parts[i + 1].g !== undefined) {
+      let g = parts[i + 1].g;
+      if (diff > 0) g = g + " ".repeat(diff); else g = g.slice(0, Math.max(1, g.length + diff));
+      parts[i + 1] = { g };
     }
+    nodes.push(<span key={i} className="palco-chord" onClick={(e) => onChordTap(nt, e)}>{nt}</span>);
+    if ((i + 1 >= parts.length || parts[i + 1].g === undefined) && diff > 0) nodes.push(<span key={i + "p"}>{" ".repeat(diff)}</span>);
   }
   return nodes;
 }
@@ -2454,10 +2511,21 @@ function TunerGauge({ note, cents, color }) {
   );
 }
 
+const TUNINGS = [
+  { id: "padrao", name: "Padrão", notes: ["E", "A", "D", "G", "B", "E"] },
+  { id: "dropd", name: "Drop D", notes: ["D", "A", "D", "G", "B", "E"] },
+  { id: "meiotom", name: "½ tom ↓", notes: ["D#", "G#", "C#", "F#", "A#", "D#"] },
+  { id: "umtom", name: "1 tom ↓", notes: ["D", "G", "C", "F", "A", "D"] },
+  { id: "dadgad", name: "DADGAD", notes: ["D", "A", "D", "G", "A", "D"] },
+  { id: "openg", name: "Open G", notes: ["D", "G", "D", "G", "B", "D"] },
+  { id: "opend", name: "Open D", notes: ["D", "A", "D", "F#", "A", "D"] },
+];
 function Tuner({ onClose, inline }) {
   const [state, setState] = useState("idle"); // idle | listening | denied | unsupported
   const [note, setNote] = useState(null); // {name, octave, cents}
+  const [tuningIdx, setTuningIdx] = useState(0);
   const ctxRef = useRef(null), streamRef = useRef(null), rafRef = useRef(null);
+  const tuning = TUNINGS[tuningIdx];
 
   const stop = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
@@ -2508,6 +2576,16 @@ function Tuner({ onClose, inline }) {
   const cents = note ? note.cents : 0;
   const inTune = note && Math.abs(cents) <= 5;
   const color = !note ? C.textFaint : inTune ? C.green : Math.abs(cents) <= 15 ? C.amber : C.red;
+  const tuningPanel = (
+    <>
+      <div className="palco-scroll" style={S.tuningChips}>
+        {TUNINGS.map((tu, i) => <button key={tu.id} className="palco-btn" style={i === tuningIdx ? S.chordPickOn : S.chordPick} onClick={() => setTuningIdx(i)}>{tu.name}</button>)}
+      </div>
+      <div style={S.tuningTargets}>
+        {tuning.notes.map((nm, i) => <span key={i} style={{ ...S.tuningTarget, ...(note && note.name === nm ? { background: color, color: "#141110", borderColor: color } : {}) }}>{nm}</span>)}
+      </div>
+    </>
+  );
 
   if (inline) {
     const active = state === "listening";
@@ -2526,7 +2604,7 @@ function Tuner({ onClose, inline }) {
             <TunerGauge note={note} cents={cents} color={color} />
             <div style={S.tunerReadout}>{note ? (inTune ? <span style={{ color: C.green, fontWeight: 800 }}>{"✓ afinado"}</span> : <span style={{ color, fontWeight: 800 }}>{cents > 0 ? "+" : ""}{cents} cents {"·"} {cents > 0 ? "afrouxe a corda" : "aperte a corda"}</span>) : "ouvindo..."}</div>
             <div style={S.tunerStrip}>{SHARP.map((nm) => (<span key={nm} style={{ ...S.tunerStripNote, color: note && note.name === nm ? color : C.textFaint, fontWeight: note && note.name === nm ? 800 : 500, transform: note && note.name === nm ? "scale(1.25)" : "none" }}>{nm}</span>))}</div>
-            <p style={S.tunerFine}>{"Cordas (padrão): E2 · A2 · D3 · G3 · B3 · E4"}</p>
+            {tuningPanel}
           </div>
         )}
         {(state === "denied" || state === "unsupported") && (
@@ -2561,10 +2639,85 @@ function Tuner({ onClose, inline }) {
             <div style={S.tunerHz}>{note && note.hz ? `${note.hz.toFixed(1)} Hz` : " "}</div>
             <TunerGauge note={note} cents={cents} color={color} />
             <div style={S.tunerScale}><span>♭ baixo</span><span style={{ color: inTune ? C.green : C.textFaint, fontWeight: 700 }}>{note ? (inTune ? "✓ afinado" : `${cents > 0 ? "+" : ""}${cents}¢`) : "ouvindo…"}</span><span>alto ♯</span></div>
-            <p style={S.tunerFine}>Cordas (padrão): E2 · A2 · D3 · G3 · B3 · E4</p>
+            {tuningPanel}
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* ---------------------------- metrônomo --------------------------- */
+function Metronome() {
+  const [playing, setPlaying] = useState(false);
+  const [bpm, setBpm] = useState(100);
+  const [beats, setBeats] = useState(4);
+  const [cur, setCur] = useState(-1);
+  const ctxRef = useRef(null), timerRef = useRef(null), stRef = useRef({ nextTime: 0, beat: 0 });
+  const bpmRef = useRef(bpm), beatsRef = useRef(beats), tapRef = useRef([]);
+  bpmRef.current = bpm; beatsRef.current = beats;
+  const click = (time, accent) => {
+    const ctx = ctxRef.current; if (!ctx) return;
+    const osc = ctx.createOscillator(), g = ctx.createGain();
+    osc.frequency.value = accent ? 1600 : 1050;
+    g.gain.setValueAtTime(0.0001, time);
+    g.gain.exponentialRampToValueAtTime(accent ? 0.7 : 0.45, time + 0.001);
+    g.gain.exponentialRampToValueAtTime(0.0001, time + 0.05);
+    osc.connect(g); g.connect(ctx.destination); osc.start(time); osc.stop(time + 0.06);
+  };
+  const scheduler = () => {
+    const ctx = ctxRef.current; if (!ctx) return; const st = stRef.current;
+    while (st.nextTime < ctx.currentTime + 0.12) {
+      const pos = st.beat % beatsRef.current;
+      click(st.nextTime, pos === 0);
+      const delay = (st.nextTime - ctx.currentTime) * 1000;
+      setTimeout(() => setCur(pos), Math.max(0, delay));
+      st.nextTime += 60 / bpmRef.current; st.beat++;
+    }
+  };
+  const start = () => {
+    const ctx = ctxRef.current || new (window.AudioContext || window.webkitAudioContext)();
+    ctxRef.current = ctx; if (ctx.state === "suspended") ctx.resume();
+    stRef.current = { nextTime: ctx.currentTime + 0.08, beat: 0 };
+    timerRef.current = setInterval(scheduler, 25); setPlaying(true);
+  };
+  const stop = () => { if (timerRef.current) clearInterval(timerRef.current); timerRef.current = null; setPlaying(false); setCur(-1); };
+  useEffect(() => () => { if (timerRef.current) clearInterval(timerRef.current); if (ctxRef.current && ctxRef.current.state !== "closed") ctxRef.current.close(); }, []);
+  const tap = () => {
+    const now = (typeof performance !== "undefined" && performance.now) ? performance.now() : new Date().getTime();
+    const arr = tapRef.current.filter((t) => now - t < 2500); arr.push(now); tapRef.current = arr;
+    if (arr.length >= 2) {
+      let sum = 0; for (let i = 1; i < arr.length; i++) sum += arr[i] - arr[i - 1];
+      setBpm(Math.max(30, Math.min(300, Math.round(60000 / (sum / (arr.length - 1))))));
+    }
+  };
+  const setB = (v) => setBpm(Math.max(30, Math.min(300, v)));
+  return (
+    <div style={S.tunerSectionSlim}>
+      <div style={{ ...S.sectionHead, marginBottom: playing ? 12 : 0 }}>
+        <Timer size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Metrônomo</span>
+        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontFamily: FONT_MONO, fontSize: 15, fontWeight: 700, color: C.text }}>{bpm}<span style={{ fontSize: 11, color: C.textFaint }}> BPM</span></span>
+          <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, padding: "8px 14px", background: playing ? C.red : C.amberDeep, color: playing ? "#fff" : "#1a140a" }} onClick={() => (playing ? stop() : start())}>{playing ? <><Square size={14} strokeWidth={2.4} fill="#fff" /> Parar</> : <><Play size={15} strokeWidth={2.4} fill="#1a140a" /> Iniciar</>}</button>
+        </span>
+      </div>
+      {playing && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, alignItems: "center" }}>
+          <div style={{ display: "flex", gap: 8 }}>
+            {Array.from({ length: beats }).map((_, i) => <span key={i} style={{ width: i === 0 ? 15 : 12, height: i === 0 ? 15 : 12, borderRadius: "50%", background: cur === i ? (i === 0 ? C.amber : C.green) : C.surface2, border: `1px solid ${cur === i ? "transparent" : C.borderSoft}`, transition: "background .05s" }} />)}
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <button className="palco-btn palco-icon" style={S.toolReset} onClick={() => setB(bpm - 5)}><Minus size={15} strokeWidth={2.5} /></button>
+            <input className="palco-range" type="range" min={40} max={240} step={1} value={bpm} onChange={(e) => setB(Number(e.target.value))} style={{ width: 150 }} />
+            <button className="palco-btn palco-icon" style={S.toolReset} onClick={() => setB(bpm + 5)}><Plus size={15} strokeWidth={2.5} /></button>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={S.toolLabel}>Compasso</span>
+            {[2, 3, 4, 6].map((n) => <button key={n} className="palco-btn" style={n === beats ? S.segActive : S.seg} onClick={() => setBeats(n)}>{n}/4</button>)}
+            <button className="palco-btn" style={S.tabToggle} onClick={tap} title="Toque no ritmo para definir o BPM"><Circle size={12} strokeWidth={0} fill={C.amber} /> Bater</button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -2714,6 +2867,14 @@ const S = {
   tunerTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, color: C.text },
   tunerSection: { background: `linear-gradient(160deg, ${C.surface}, ${C.surface2})`, border: `1px solid ${C.border}`, borderRadius: 16, padding: "14px 16px 12px", marginBottom: 18, boxShadow: "0 8px 26px rgba(0,0,0,.28)" },
   tunerSectionSlim: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 14px", marginBottom: 18 },
+  chordLibEntry: { display: "flex", alignItems: "center", gap: 10, width: "100%", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "13px 15px", marginBottom: 18, fontFamily: FONT_UI, fontSize: 14.5, color: C.text, cursor: "pointer" },
+  chordPickRow: { display: "flex", flexWrap: "wrap", gap: 7, marginTop: 14 },
+  chordPick: { background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, padding: "7px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13.5, cursor: "pointer" },
+  chordPickOn: { background: C.amber, color: "#1a140a", border: `1px solid ${C.amber}`, borderRadius: 9, padding: "7px 12px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 13.5, cursor: "pointer" },
+  chordLibTitle: { fontFamily: FONT_DISPLAY, fontWeight: 700, fontSize: 30, color: C.amber, marginTop: 22, marginBottom: 4 },
+  chordGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 14, marginTop: 8 },
+  chordCard: { background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 12, padding: "10px 8px 8px" },
+  chordCardLabel: { textAlign: "center", fontSize: 11.5, color: C.textFaint, marginTop: 4 },
   mediaItem: { background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 12, padding: "8px 10px" },
   mediaRow: { display: "flex", alignItems: "center", gap: 10 },
   mediaIcon: { width: 32, height: 32, borderRadius: 9, background: "rgba(240,168,51,.10)", border: `1px solid rgba(240,168,51,.28)`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
@@ -2728,6 +2889,9 @@ const S = {
   buildFooter: { textAlign: "center", fontSize: 11.5, color: C.textFaint, marginTop: 26, paddingBottom: 6 },
   buildLink: { background: "none", border: "none", color: C.amber, fontSize: 11.5, cursor: "pointer", padding: 0, textDecoration: "underline" },
   tunerReadout: { fontSize: 15, color: C.textDim, minHeight: 20, marginTop: -2 },
+  tuningChips: { display: "flex", gap: 6, overflowX: "auto", width: "100%", paddingBottom: 2, justifyContent: "center", flexWrap: "wrap" },
+  tuningTargets: { display: "flex", gap: 7, justifyContent: "center", flexWrap: "wrap", marginTop: 2 },
+  tuningTarget: { fontFamily: FONT_MONO, fontSize: 13, fontWeight: 700, color: C.textDim, background: C.surface2, border: `1px solid ${C.borderSoft}`, borderRadius: 7, padding: "3px 8px", minWidth: 26, textAlign: "center" },
   tunerStrip: { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "6px 12px", width: "100%", maxWidth: 340, fontFamily: FONT_MONO, fontSize: 14 },
   tunerStripNote: { transition: "all .12s ease", minWidth: 20 },
   tunerBody: { display: "flex", flexDirection: "column", alignItems: "center", gap: 14, padding: "18px 6px 6px", textAlign: "center" },
