@@ -3,7 +3,7 @@ import {
   Play, Pause, ArrowLeft, ChevronLeft, Music2, ListMusic, Plus, Minus,
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
   Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
-  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Circle, Video, Image as ImageIcon,
+  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Circle, Video, MoreHorizontal, Image as ImageIcon,
   RotateCw, GripVertical, Eye, EyeOff, ChevronRight,
 } from "lucide-react";
 import DEFAULT_LIBRARY from "./defaultLibrary.json";
@@ -440,6 +440,24 @@ function chordVariations(name) {
   if (!uniq.length) { const d = chordDiagram(name); if (d) uniq.push({ frets: d.frets, approx: d.approx }); }
   return uniq;
 }
+// deduz o dedilhado (dedos 1–4) e a pestana a partir das casas
+// pestana só quando há mais de 4 cordas presas (aí um dedo precisa barrar); senão usa dedos separados
+function computeFingering(frets) {
+  const fingers = frets.map(() => 0);
+  const pressed = frets.map((f, i) => ({ f, i })).filter((x) => x.f > 0);
+  if (!pressed.length) return { fingers, barre: null };
+  const minFret = Math.min(...pressed.map((x) => x.f));
+  const atMin = pressed.filter((x) => x.f === minFret).map((x) => x.i);
+  let barre = null;
+  if (atMin.length >= 2 && pressed.length > 4) {
+    barre = { fret: minFret, from: Math.min(...atMin), to: Math.max(...atMin) };
+    frets.forEach((f, i) => { if (f === minFret && i >= barre.from && i <= barre.to) fingers[i] = 1; });
+  }
+  const rest = pressed.filter((x) => fingers[x.i] === 0).sort((a, b) => a.f - b.f || a.i - b.i);
+  let next = barre ? 2 : 1;
+  for (const x of rest) { fingers[x.i] = Math.min(4, next); next++; }
+  return { fingers, barre };
+}
 
 /* ------------------------ pitch (afinador) ------------------------ */
 function autoCorrelate(buf, sampleRate) {
@@ -702,6 +720,7 @@ export default function Palco() {
   const [medias, setMedias] = useState([]);                        // gravações salvas (IndexedDB), desc por data
   const [mediaUrl, setMediaUrl] = useState(null);                  // { id, url } do player aberto
   const [pendingMediaDel, setPendingMediaDel] = useState(null);    // id aguardando confirmação de exclusão
+  const [mediasAllOpen, setMediasAllOpen] = useState(false);       // modal "ver todas as mídias"
   const [coverFor, setCoverFor] = useState(null);                  // id do álbum cuja capa está sendo editada
   const [coverUrl, setCoverUrl] = useState("");
   const coverFileRef = useRef(null);
@@ -998,6 +1017,31 @@ export default function Palco() {
     setMedias((m) => m.filter((x) => x.id !== id)); setPendingMediaDel(null);
     idbDeleteRec(id).catch(() => {});
   };
+  const mediaItemView = (m) => (
+    <div key={m.id} style={S.mediaItem}>
+      <div style={S.mediaRow}>
+        <span style={S.mediaIcon}>{m.kind === "video" ? <Video size={16} color={C.amber} strokeWidth={2} /> : <Mic size={16} color={C.amber} strokeWidth={2} />}</span>
+        <span style={S.mediaMeta}><span style={S.mediaName}>{m.name}</span><span style={S.mediaSub}>{new Date(m.ts).toLocaleDateString("pt-BR")} {new Date(m.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })} · {fmtMMSS(m.durSec)} · {fmtBytes(m.size)}</span></span>
+        <div style={S.mediaActions}>
+          <button className="palco-btn palco-icon" style={S.mediaBtn} onClick={() => playMedia(m)} title="Reproduzir">{mediaUrl && mediaUrl.id === m.id ? <Square size={14} strokeWidth={2.3} /> : <Play size={15} strokeWidth={2.2} fill="currentColor" />}</button>
+          <button className="palco-btn palco-icon" style={S.mediaBtn} onClick={() => downloadMedia(m)} title="Baixar"><Download size={15} strokeWidth={2.1} /></button>
+          {pendingMediaDel === m.id ? (
+            <>
+              <button className="palco-btn" style={S.confirmYes} onClick={() => deleteMedia(m.id)} title="Confirmar exclusão"><Check size={13} strokeWidth={2.6} /></button>
+              <button className="palco-btn" style={S.confirmNo} onClick={() => setPendingMediaDel(null)} title="Cancelar"><X size={13} strokeWidth={2.6} /></button>
+            </>
+          ) : (
+            <button className="palco-btn palco-icon palco-trash" style={S.mediaBtn} onClick={() => setPendingMediaDel(m.id)} title="Apagar"><Trash2 size={14} strokeWidth={2} /></button>
+          )}
+        </div>
+      </div>
+      {mediaUrl && mediaUrl.id === m.id && (
+        m.kind === "video"
+          ? <video src={mediaUrl.url} controls autoPlay playsInline style={S.mediaPlayerVideo} />
+          : <audio src={mediaUrl.url} controls autoPlay style={S.mediaPlayerAudio} />
+      )}
+    </div>
+  );
 
   // --- Voltar do celular (gesto/botão): navega dentro do app em vez de fechar ---
   const navRef = useRef({});
@@ -1895,31 +1939,10 @@ export default function Palco() {
               <p style={S.sessionHint}>Suas gravações de áudio e vídeo aparecem aqui — dá pra rever, baixar de novo e apagar. Elas ficam salvas neste aparelho.</p>
             ) : (
               <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                {medias.slice(0, 8).map((m) => (
-                  <div key={m.id} style={S.mediaItem}>
-                    <div style={S.mediaRow}>
-                      <span style={S.mediaIcon}>{m.kind === "video" ? <Video size={16} color={C.amber} strokeWidth={2} /> : <Mic size={16} color={C.amber} strokeWidth={2} />}</span>
-                      <span style={S.mediaMeta}><span style={S.mediaName}>{m.name}</span><span style={S.mediaSub}>{new Date(m.ts).toLocaleDateString("pt-BR")} {new Date(m.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })} · {fmtMMSS(m.durSec)} · {fmtBytes(m.size)}</span></span>
-                      <div style={S.mediaActions}>
-                        <button className="palco-btn palco-icon" style={S.mediaBtn} onClick={() => playMedia(m)} title="Reproduzir">{mediaUrl && mediaUrl.id === m.id ? <Square size={14} strokeWidth={2.3} /> : <Play size={15} strokeWidth={2.2} fill="currentColor" />}</button>
-                        <button className="palco-btn palco-icon" style={S.mediaBtn} onClick={() => downloadMedia(m)} title="Baixar"><Download size={15} strokeWidth={2.1} /></button>
-                        {pendingMediaDel === m.id ? (
-                          <>
-                            <button className="palco-btn" style={S.confirmYes} onClick={() => deleteMedia(m.id)} title="Confirmar exclusão"><Check size={13} strokeWidth={2.6} /></button>
-                            <button className="palco-btn" style={S.confirmNo} onClick={() => setPendingMediaDel(null)} title="Cancelar"><X size={13} strokeWidth={2.6} /></button>
-                          </>
-                        ) : (
-                          <button className="palco-btn palco-icon palco-trash" style={S.mediaBtn} onClick={() => setPendingMediaDel(m.id)} title="Apagar"><Trash2 size={14} strokeWidth={2} /></button>
-                        )}
-                      </div>
-                    </div>
-                    {mediaUrl && mediaUrl.id === m.id && (
-                      m.kind === "video"
-                        ? <video src={mediaUrl.url} controls autoPlay playsInline style={S.mediaPlayerVideo} />
-                        : <audio src={mediaUrl.url} controls autoPlay style={S.mediaPlayerAudio} />
-                    )}
-                  </div>
-                ))}
+                {medias.slice(0, 3).map(mediaItemView)}
+                {medias.length > 3 && (
+                  <button className="palco-btn" style={S.mediaMore} onClick={() => setMediasAllOpen(true)} title="Ver todas as gravações"><MoreHorizontal size={18} strokeWidth={2.2} /> Ver todas as {medias.length} gravações</button>
+                )}
               </div>
             )}
           </div>
@@ -1949,6 +1972,16 @@ export default function Palco() {
         {renameModal}
         {coverModal}
         {confirmDelModal}
+        {mediasAllOpen && (
+          <div style={S.tunerOverlay} onClick={() => setMediasAllOpen(false)}>
+            <div style={S.pickerCard} onClick={(e) => e.stopPropagation()}>
+              <div style={S.tunerHead}><div style={{ display: "flex", alignItems: "center", gap: 9 }}><Video size={17} color={C.amber} strokeWidth={2.2} /><span style={S.tunerTitle}>Mídias ({medias.length})</span></div><button className="palco-btn palco-icon" style={S.popClose} onClick={() => setMediasAllOpen(false)}><X size={16} strokeWidth={2.3} /></button></div>
+              <div className="palco-scroll" style={{ display: "flex", flexDirection: "column", gap: 8, maxHeight: "62vh", overflowY: "auto", marginTop: 6 }}>
+                {medias.map(mediaItemView)}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -2354,22 +2387,40 @@ function ChordDiagram({ frets }) {
   const maxF = positives.length ? Math.max(...positives) : 0;
   const minF = positives.length ? Math.min(...positives) : 0;
   const base = maxF <= 4 ? 1 : minF;
-  const W = 104, H = 116, padX = 13, padTop = 19, gridW = W - padX * 2, FRETS = 5;
-  const sx = gridW / 5, fy = (H - padTop - 10) / FRETS;
+  const { fingers, barre } = computeFingering(frets);
+  const W = 124, H = 140, padX = 16, padTop = 26, gridW = W - padX * 2, FRETS = 5;
+  const sx = gridW / 5, fy = (H - padTop - 12) / FRETS;
   const stringX = (s) => padX + s * sx;
+  const rowY = (f) => padTop + (f - base) * fy + fy / 2;
   const grid = NEON_GREEN, dot = "#FF4D4D", faint = C.textFaint;
+  const R = 6.6;
   return (
     <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{ display: "block" }}>
       {base === 1 && <rect x={padX - 1} y={padTop - 3} width={gridW + 2} height={3.5} fill={grid} rx={1} />}
-      {base > 1 && <text x={padX - 5} y={padTop + fy * 0.7} fontSize="9" fill={faint} textAnchor="end" fontFamily={FONT_MONO}>{base}ª</text>}
-      {Array.from({ length: FRETS + 1 }).map((_, r) => <line key={"h" + r} x1={padX} y1={padTop + r * fy} x2={padX + gridW} y2={padTop + r * fy} stroke={grid} strokeWidth={1} opacity={0.7} />)}
-      {Array.from({ length: 6 }).map((_, s) => <line key={"v" + s} x1={stringX(s)} y1={padTop} x2={stringX(s)} y2={padTop + FRETS * fy} stroke={grid} strokeWidth={1} opacity={0.7} />)}
+      {base > 1 && <text x={padX - 6} y={rowY(base) + 3} fontSize="9" fill={faint} textAnchor="end" fontFamily={FONT_MONO}>{base}ª</text>}
+      {Array.from({ length: FRETS + 1 }).map((_, r) => <line key={"h" + r} x1={padX} y1={padTop + r * fy} x2={padX + gridW} y2={padTop + r * fy} stroke={grid} strokeWidth={1} opacity={0.65} />)}
+      {Array.from({ length: 6 }).map((_, s) => <line key={"v" + s} x1={stringX(s)} y1={padTop} x2={stringX(s)} y2={padTop + FRETS * fy} stroke={grid} strokeWidth={1} opacity={0.65} />)}
+      {/* marcadores de corda solta (○) / abafada (×) acima da pestana */}
       {frets.map((f, s) => {
         const x = stringX(s);
-        if (f === -1) return <text key={"x" + s} x={x} y={padTop - 7} fontSize="11" fill={faint} textAnchor="middle">×</text>;
-        if (f === 0) return <circle key={"o" + s} cx={x} cy={padTop - 10} r={3.2} fill="none" stroke={grid} strokeWidth={1.4} />;
-        const row = f - base;
-        return <circle key={"d" + s} cx={x} cy={padTop + row * fy + fy / 2} r={5.4} fill={dot} />;
+        if (f === -1) return <text key={"x" + s} x={x} y={padTop - 8} fontSize="11" fill={faint} textAnchor="middle" fontWeight="700">×</text>;
+        if (f === 0) return <circle key={"o" + s} cx={x} cy={padTop - 11} r={3.4} fill="none" stroke={grid} strokeWidth={1.5} />;
+        return null;
+      })}
+      {/* pestana (barra) */}
+      {barre && <rect x={stringX(barre.from) - R} y={rowY(barre.fret) - R} width={stringX(barre.to) - stringX(barre.from) + 2 * R} height={2 * R} rx={R} fill={dot} />}
+      {barre && <text x={(stringX(barre.from) + stringX(barre.to)) / 2} y={rowY(barre.fret) + 0.5} fontSize="8.5" fill="#fff" textAnchor="middle" dominantBaseline="central" fontWeight="700" fontFamily={FONT_UI}>1</text>}
+      {/* pontos com o número do dedo */}
+      {frets.map((f, s) => {
+        if (f <= 0) return null;
+        if (barre && f === barre.fret && s >= barre.from && s <= barre.to) return null; // já coberto pela pestana
+        const x = stringX(s), y = rowY(f);
+        return (
+          <g key={"d" + s}>
+            <circle cx={x} cy={y} r={R} fill={dot} />
+            {fingers[s] > 0 && <text x={x} y={y + 0.5} fontSize="8.5" fill="#fff" textAnchor="middle" dominantBaseline="central" fontWeight="700" fontFamily={FONT_UI}>{fingers[s]}</text>}
+          </g>
+        );
       })}
     </svg>
   );
@@ -2541,8 +2592,8 @@ const S = {
   albumsHead: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap", marginBottom: 18 },
   libActions: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 },
   libRow: { display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", justifyContent: "flex-end" },
-  iconGhost: { display: "inline-flex", alignItems: "center", gap: 7, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "9px 13px", fontFamily: FONT_UI, fontWeight: 500, fontSize: 13.5, cursor: "pointer" },
-  iconGhostLabel: { fontSize: 13.5 },
+  iconGhost: { display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "7px 10px", fontFamily: FONT_UI, fontWeight: 500, fontSize: 12.5, cursor: "pointer", flexShrink: 0 },
+  iconGhostLabel: { fontSize: 12.5 },
   searchWrap: { display: "flex", alignItems: "center", gap: 9, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 12, padding: "0 12px", marginBottom: 18 },
   searchInput: { flex: 1, background: "transparent", color: C.text, border: "none", outline: "none", padding: "13px 0", fontFamily: FONT_UI, fontSize: 15 },
   searchListHead: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.textFaint, fontWeight: 600, padding: "4px 4px 8px" },
@@ -2624,18 +2675,18 @@ const S = {
   fontControls: { display: "flex", alignItems: "center", gap: 1, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 9, padding: 2, flexShrink: 0 },
   fontBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 28, background: "transparent", color: C.textDim, border: "none", borderRadius: 6, cursor: "pointer" },
   fontVal: { fontFamily: FONT_MONO, fontSize: 12, color: C.textDim, width: 18, textAlign: "center" },
-  toolsBar: { display: "flex", alignItems: "center", gap: 10, padding: "10px 16px", borderBottom: `1px solid ${C.borderSoft}`, flexShrink: 0, flexWrap: "wrap", rowGap: 8 },
-  toolGroup: { display: "flex", alignItems: "center", gap: 4, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "4px 6px 4px 10px", flexShrink: 0 },
-  toolLabel: { fontSize: 11, letterSpacing: "0.08em", textTransform: "uppercase", color: C.textFaint, fontWeight: 600, marginRight: 2 },
-  toolBtn: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textDim, border: "none", borderRadius: 7, cursor: "pointer" },
-  toolVal: { fontFamily: FONT_MONO, fontSize: 13, fontWeight: 600, minWidth: 26, textAlign: "center" },
-  toolReset: { width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, cursor: "pointer", flexShrink: 0 },
+  toolsBar: { display: "flex", alignItems: "center", gap: 7, padding: "8px 12px", borderBottom: `1px solid ${C.borderSoft}`, flexShrink: 0, flexWrap: "wrap", rowGap: 7 },
+  toolGroup: { display: "flex", alignItems: "center", gap: 3, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "3px 5px 3px 8px", flexShrink: 0 },
+  toolLabel: { fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase", color: C.textFaint, fontWeight: 600, marginRight: 1 },
+  toolBtn: { width: 25, height: 25, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textDim, border: "none", borderRadius: 7, cursor: "pointer" },
+  toolVal: { fontFamily: FONT_MONO, fontSize: 12, fontWeight: 600, minWidth: 20, textAlign: "center" },
+  toolReset: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, cursor: "pointer", flexShrink: 0 },
   tunerBtn: { display: "inline-flex", alignItems: "center", gap: 7, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "8px 14px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13.5, cursor: "pointer", flexShrink: 0, marginLeft: "auto" },
-  tunerIcon: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, cursor: "pointer", flexShrink: 0 },
-  tabToggle: { display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", flexShrink: 0 },
-  tabToggleOn: { display: "inline-flex", alignItems: "center", gap: 6, background: C.amber, color: "#1a140a", border: `1px solid ${C.amber}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 },
-  recBtn: { display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", flexShrink: 0 },
-  recBtnOn: { display: "inline-flex", alignItems: "center", gap: 6, background: C.red, color: "#fff", border: `1px solid ${C.red}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 },
+  tunerIcon: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 32, height: 32, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, cursor: "pointer", flexShrink: 0 },
+  tabToggle: { display: "inline-flex", alignItems: "center", gap: 5, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, padding: "6px 9px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 12, cursor: "pointer", flexShrink: 0 },
+  tabToggleOn: { display: "inline-flex", alignItems: "center", gap: 5, background: C.amber, color: "#1a140a", border: `1px solid ${C.amber}`, borderRadius: 9, padding: "6px 9px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 12, cursor: "pointer", flexShrink: 0 },
+  recBtn: { display: "inline-flex", alignItems: "center", gap: 5, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 9, padding: "6px 9px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 12, cursor: "pointer", flexShrink: 0 },
+  recBtnOn: { display: "inline-flex", alignItems: "center", gap: 5, background: C.red, color: "#fff", border: `1px solid ${C.red}`, borderRadius: 9, padding: "6px 9px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 12, cursor: "pointer", flexShrink: 0 },
   cifraScroll: { flex: 1, overflowY: "auto", overflowX: "auto", scrollBehavior: "auto" },
   cifra: { fontFamily: FONT_MONO, padding: "24px 26px 0", maxWidth: 900, margin: "0 auto" },
   transportZone: { padding: "0 18px calc(18px + env(safe-area-inset-bottom))", flexShrink: 0, background: `linear-gradient(to top, ${C.bg} 60%, transparent)` },
@@ -2673,6 +2724,7 @@ const S = {
   mediaBtn: { width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 8, cursor: "pointer" },
   mediaPlayerVideo: { width: "100%", maxHeight: 340, marginTop: 9, borderRadius: 10, background: "#000", display: "block" },
   mediaPlayerAudio: { width: "100%", marginTop: 9, display: "block" },
+  mediaMore: { display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, background: C.surface, color: C.textDim, border: `1px dashed ${C.border}`, borderRadius: 12, padding: "10px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer" },
   buildFooter: { textAlign: "center", fontSize: 11.5, color: C.textFaint, marginTop: 26, paddingBottom: 6 },
   buildLink: { background: "none", border: "none", color: C.amber, fontSize: 11.5, cursor: "pointer", padding: 0, textDecoration: "underline" },
   tunerReadout: { fontSize: 15, color: C.textDim, minHeight: 20, marginTop: -2 },
@@ -2690,8 +2742,8 @@ const S = {
   tunerScale: { display: "flex", justifyContent: "space-between", width: "100%", fontSize: 12, color: C.textFaint },
   // ----- Modo Jogo -----
   modeSeg: { display: "flex", background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: 3, gap: 3, flexShrink: 0 },
-  seg: { border: "none", background: "transparent", color: C.textDim, fontFamily: FONT_UI, fontWeight: 600, fontSize: 12.5, padding: "6px 12px", borderRadius: 8, cursor: "pointer" },
-  segActive: { border: "none", background: C.amber, color: "#1a140a", fontFamily: FONT_UI, fontWeight: 700, fontSize: 12.5, padding: "6px 12px", borderRadius: 8, cursor: "pointer" },
+  seg: { border: "none", background: "transparent", color: C.textDim, fontFamily: FONT_UI, fontWeight: 600, fontSize: 12, padding: "5px 9px", borderRadius: 8, cursor: "pointer" },
+  segActive: { border: "none", background: C.amber, color: "#1a140a", fontFamily: FONT_UI, fontWeight: 700, fontSize: 12, padding: "5px 9px", borderRadius: 8, cursor: "pointer" },
   cifraWrap: { position: "relative", flex: 1, minHeight: 0, display: "flex" },
   hitLine: { position: "absolute", left: 0, right: 0, top: "38%", borderTop: `2px dashed ${C.amber}`, opacity: 0.45, pointerEvents: "none" },
   gamePanel: { maxWidth: 720, margin: "0 auto", background: C.surface, border: `1px solid ${C.border}`, borderRadius: 18, padding: "12px 16px", boxShadow: "0 12px 40px rgba(0,0,0,.45)" },
