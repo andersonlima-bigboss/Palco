@@ -681,6 +681,7 @@ export default function Palco() {
   const recPreviewRef = useRef(null);                              // <video> de prévia da câmera
   const [recPos, setRecPos] = useState(() => ({ x: (typeof window !== "undefined" ? window.innerWidth - 84 - 10 : 280), y: 110 })); // prévia à direita (arrastável)
   const recDragRef = useRef(null);
+  const [confirmLeaveRec, setConfirmLeaveRec] = useState(false);   // pergunta ao tentar sair gravando
   const [coverFor, setCoverFor] = useState(null);                  // id do álbum cuja capa está sendo editada
   const [coverUrl, setCoverUrl] = useState("");
   const coverFileRef = useRef(null);
@@ -958,7 +959,7 @@ export default function Palco() {
 
   // --- Voltar do celular (gesto/botão): navega dentro do app em vez de fechar ---
   const navRef = useRef({});
-  navRef.current = { view, selected, isSetlistCtx, openSetId, tunerOpen, rename, coverFor, popovers, editSet };
+  navRef.current = { view, selected, isSetlistCtx, openSetId, tunerOpen, rename, coverFor, popovers, editSet, recOn };
   const doPopBack = () => {
     const st = navRef.current;
     if (st.popovers && st.popovers.length) { setPopovers([]); return; }
@@ -980,6 +981,7 @@ export default function Palco() {
     try { window.history.pushState({ palco: true }, ""); } catch (e) {}
     const onPop = () => {
       if (canPopBack()) { doPopBack(); try { window.history.pushState({ palco: true }, ""); } catch (e) {} }
+      else if (navRef.current.recOn) { setConfirmLeaveRec(true); try { window.history.pushState({ palco: true }, ""); } catch (e) {} } // gravando: segura e pergunta
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -1315,13 +1317,14 @@ export default function Palco() {
     setRecError("");
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") { setRecError("Gravação não suportada neste navegador."); return; }
     const wantVideo = kind === "video";
+    const cleanAudio = { echoCancellation: false, noiseSuppression: false, autoGainControl: false }; // sem filtros → som real do instrumento
     try {
       const stream = await navigator.mediaDevices.getUserMedia(wantVideo
-        ? { video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: true }
-        : { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+        ? { video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: cleanAudio }
+        : { audio: cleanAudio });
       const cands = wantVideo
-        ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
-        : ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];
+        ? ["video/mp4;codecs=h264,aac", "video/mp4", "video/webm;codecs=h264,opus", "video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm"]
+        : ["audio/mp4;codecs=mp4a.40.2", "audio/mp4", "audio/webm;codecs=opus", "audio/webm", "audio/ogg"];
       let mime = "";
       for (const m of cands) { if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) { mime = m; break; } }
       const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
@@ -1564,7 +1567,19 @@ export default function Palco() {
       <video ref={recPreviewRef} autoPlay muted playsInline style={S.recPreview} />
     </div>
   ) : null;
-  const overlays = <>{stageClock}{recBadge}{recPreview}</>;
+  const recLeaveModal = confirmLeaveRec ? (
+    <div style={S.tunerOverlay} onClick={() => setConfirmLeaveRec(false)}>
+      <div style={{ ...S.tunerCard, maxWidth: 340 }} onClick={(e) => e.stopPropagation()}>
+        <div style={S.tunerHead}><div style={{ display: "flex", alignItems: "center", gap: 9 }}><Circle size={14} strokeWidth={0} fill={C.red} className="neon-pulse" /><span style={S.tunerTitle}>Gravação em andamento</span></div></div>
+        <p style={{ ...S.tunerMsg, textAlign: "left", margin: "4px 0 16px" }}>Você está gravando {recKind === "video" ? "vídeo" : "áudio"} ({fmtMMSS(recSec)}). Se sair sem finalizar, a gravação é perdida. Deseja finalizar e salvar agora?</p>
+        <div style={{ display: "flex", flexDirection: "column", gap: 9 }}>
+          <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff", justifyContent: "center" }} onClick={() => { stopRecordingAndSave(selectedSong?.title || (session && session.name) || "cifra"); setConfirmLeaveRec(false); }}><Square size={15} strokeWidth={2.4} fill="#fff" /> Finalizar e salvar</button>
+          <button className="palco-btn palco-ghost" style={{ ...S.btnGhost, justifyContent: "center" }} onClick={() => setConfirmLeaveRec(false)}>Continuar gravando</button>
+        </div>
+      </div>
+    </div>
+  ) : null;
+  const overlays = <>{stageClock}{recBadge}{recPreview}{recLeaveModal}</>;
 
   /* --------------------------- SESSÕES ----------------------------- */
   if (view === "sessions") {
