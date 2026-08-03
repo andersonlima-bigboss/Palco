@@ -3,7 +3,7 @@ import {
   Play, Pause, ArrowLeft, ChevronLeft, Music2, ListMusic, Plus, Minus,
   RotateCcw, FileText, Disc3, FolderPlus, Trash2, Maximize2, Check,
   Download, Upload, Star, Search, Mic, X, Guitar, Volume2, VolumeX, Youtube,
-  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Image as ImageIcon,
+  Clock, AlertTriangle, Pencil, ChevronUp, ChevronDown, Square, BarChart3, Radio, Circle, Video, Image as ImageIcon,
   RotateCw, GripVertical, Eye, EyeOff, ChevronRight,
 } from "lucide-react";
 import DEFAULT_LIBRARY from "./defaultLibrary.json";
@@ -671,6 +671,12 @@ export default function Palco() {
   const [session, setSession] = useState(null);                    // { name, startMs } | null (apresentação em curso)
   const [sessionName, setSessionName] = useState("");              // nome digitado antes de iniciar
   const sessionRef = useRef({ songStart: 0, curKey: null, curMeta: null, songs: {} }); // acumula tempo por música
+  const recRef = useRef(null);                                     // { stream, recorder, chunks, mime } da gravação
+  const [recOn, setRecOn] = useState(false);                       // gravando o áudio da apresentação
+  const [recError, setRecError] = useState("");
+  const [recSec, setRecSec] = useState(0);                         // segundos decorridos da gravação atual
+  const [recKind, setRecKind] = useState(null);                    // "audio" | "video" | null
+  const recPreviewRef = useRef(null);                              // <video> de prévia da câmera
   const [coverFor, setCoverFor] = useState(null);                  // id do álbum cuja capa está sendo editada
   const [coverUrl, setCoverUrl] = useState("");
   const coverFileRef = useRef(null);
@@ -719,6 +725,16 @@ export default function Palco() {
     const id = setInterval(() => setClockSec((s) => s + 1), 1000);
     return () => clearInterval(id);
   }, [clockRun]);
+  useEffect(() => {
+    if (!recOn) return;
+    const id = setInterval(() => setRecSec((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [recOn]);
+  useEffect(() => {
+    if (recOn && recKind === "video" && recPreviewRef.current && recRef.current && recRef.current.stream) {
+      try { recPreviewRef.current.srcObject = recRef.current.stream; } catch (e) {}
+    }
+  }, [recOn, recKind]);
   useEffect(() => {
     (async () => {
       const v = await storageGet(STORAGE_KEY);
@@ -920,6 +936,35 @@ export default function Palco() {
     setTimeout(() => setSelected(pos), 0);
   };
   const resetScroll = () => { setPlaying(false); accRef.current = 0; if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "smooth" }); };
+
+  // --- Voltar do celular (gesto/botão): navega dentro do app em vez de fechar ---
+  const navRef = useRef({});
+  navRef.current = { view, selected, isSetlistCtx, openSetId, tunerOpen, rename, coverFor, popovers, editSet };
+  const doPopBack = () => {
+    const st = navRef.current;
+    if (st.popovers && st.popovers.length) { setPopovers([]); return; }
+    if (st.tunerOpen) { setTunerOpen(false); return; }
+    if (st.rename) { setRename(null); return; }
+    if (st.coverFor) { setCoverFor(null); return; }
+    if (st.view === "album") { if (st.selected != null) backToSongs(); else backToAlbums(); return; }
+    if (st.view === "setlist") { setOpenSetId(null); setView("albums"); return; }
+    if (st.view === "setlist-edit") { setEditSet(null); setView(st.openSetId ? "setlist" : "albums"); return; }
+    if (st.view === "sessions" || st.view === "import") { setView("albums"); return; }
+  };
+  const canPopBack = () => {
+    const st = navRef.current;
+    if (st.popovers && st.popovers.length) return true;
+    if (st.tunerOpen || st.rename || st.coverFor) return true;
+    return st.view === "album" || st.view === "setlist" || st.view === "setlist-edit" || st.view === "sessions" || st.view === "import";
+  };
+  useEffect(() => {
+    try { window.history.pushState({ palco: true }, ""); } catch (e) {}
+    const onPop = () => {
+      if (canPopBack()) { doPopBack(); try { window.history.pushState({ palco: true }, ""); } catch (e) {} }
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
 
   /* importação */
   const goImport = () => { setView("import"); setPreview(null); setImportErr(""); setLibMsg(""); };
@@ -1245,14 +1290,64 @@ export default function Palco() {
   };
 
   // ---- sessões de apresentação (cronômetro + registro do setlist) ----
+  // grava áudio (microfone) ou vídeo (câmera+microfone); best-effort, não interrompe a navegação
+  const startRecording = async (kind = "audio") => {
+    if (recRef.current) return;                 // já há uma gravação em curso
+    setRecError("");
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || typeof MediaRecorder === "undefined") { setRecError("Gravação não suportada neste navegador."); return; }
+    const wantVideo = kind === "video";
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia(wantVideo
+        ? { video: { facingMode: "user", width: { ideal: 1280 }, height: { ideal: 720 } }, audio: true }
+        : { audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      const cands = wantVideo
+        ? ["video/webm;codecs=vp9,opus", "video/webm;codecs=vp8,opus", "video/webm", "video/mp4"]
+        : ["audio/webm;codecs=opus", "audio/webm", "audio/mp4", "audio/ogg"];
+      let mime = "";
+      for (const m of cands) { if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(m)) { mime = m; break; } }
+      const recorder = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream);
+      const chunks = [];
+      recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      recorder.start(1000);
+      recRef.current = { stream, recorder, chunks, mime: recorder.mimeType || mime || (wantVideo ? "video/webm" : "audio/webm"), kind };
+      setRecKind(kind); setRecSec(0); setRecOn(true);
+    } catch (e) { setRecError(wantVideo ? "Câmera/microfone bloqueados — precisa de https e permissão." : "Microfone bloqueado — segue sem gravar (precisa de https/permissão)."); }
+  };
+  const stopRecordingAndSave = (nm) => {
+    const r = recRef.current; recRef.current = null; setRecOn(false); setRecKind(null);
+    if (r && recPreviewRef.current) { try { recPreviewRef.current.srcObject = null; } catch (e) {} }
+    if (!r) return;
+    const stopStream = () => { try { r.stream.getTracks().forEach((t) => t.stop()); } catch (e) {} };
+    if (r.recorder && r.recorder.state !== "inactive") {
+      r.recorder.onstop = () => {
+        try {
+          const blob = new Blob(r.chunks, { type: r.mime });
+          if (blob.size > 0) {
+            const ext = r.kind === "video" ? (r.mime.includes("mp4") ? "mp4" : "webm") : (r.mime.includes("mp4") ? "m4a" : r.mime.includes("ogg") ? "ogg" : "webm");
+            const prefix = r.kind === "video" ? "video" : "gravacao";
+            const clean = ((nm || "apresentacao").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-") || "apresentacao");
+            const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "h");
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement("a"); a.href = url; a.download = `${prefix}-${clean}-${stamp}.${ext}`;
+            document.body.appendChild(a); a.click(); a.remove();
+            setTimeout(() => URL.revokeObjectURL(url), 3000);
+          }
+        } catch (e) {}
+        stopStream();
+      };
+      try { r.recorder.stop(); } catch (e) { stopStream(); }
+    } else stopStream();
+  };
+
   const startSession = () => {
     const name = (sessionName || "").trim() || "Apresentação";
     sessionRef.current = { songStart: Date.now(), curKey: selKey, curMeta: selectedSong ? { albumId: selectedSong.albumId, idx: selectedSong.idx, title: selectedSong.title } : null, songs: {} };
     setSession({ name, startMs: Date.now() });
     setClockRun(true); setClockSec(0);
+    startRecording();
   };
   const endSession = () => {
-    if (!session) { setClockRun(false); return; }
+    if (!session) { setClockRun(false); stopRecordingAndSave(null); return; }
     const r = sessionRef.current, now = Date.now();
     if (r.curKey != null && r.curMeta) {
       const e = r.songs[r.curKey] || (r.songs[r.curKey] = { ...r.curMeta, secs: 0 });
@@ -1262,6 +1357,7 @@ export default function Palco() {
     const rec = { id: "ses_" + now, name: session.name, start: session.startMs, end: now, durSec: Math.round((now - session.startMs) / 1000), songs };
     commit({ ...library, sessions: [rec, ...(library.sessions || [])] });
     sessionRef.current = { songStart: 0, curKey: null, curMeta: null, songs: {} };
+    stopRecordingAndSave(session.name);
     setSession(null); setClockRun(false); setClockSec(0); setSessionName("");
   };
   const deleteSession = (id) => commit({ ...library, sessions: (library.sessions || []).filter((s) => s.id !== id) });
@@ -1422,6 +1518,19 @@ export default function Palco() {
       <button className="palco-btn" style={{ ...S.stageClockBtn, color: C.red }} onClick={endSession} title="Encerrar apresentação"><Square size={11} strokeWidth={2.6} fill="currentColor" /></button>
     </div>
   ) : null;
+  // badge de gravação — fixo no canto, visível em todas as telas enquanto grava
+  const recBadge = recOn ? (
+    <div style={S.recBadgeFixed}>
+      {recKind === "video" ? <Video size={13} strokeWidth={2.3} className="neon-pulse" /> : <Circle size={11} strokeWidth={0} fill="#fff" className="neon-pulse" />}
+      <span style={{ fontWeight: 700, letterSpacing: 0.5 }}>REC</span>
+      <span style={{ fontFamily: FONT_MONO, fontSize: 12.5, fontWeight: 700, minWidth: 42, textAlign: "center" }}>{fmtMMSS(recSec)}</span>
+      <button className="palco-btn" style={S.recBadgeBtn} onClick={() => stopRecordingAndSave(selectedSong?.title || (session && session.name) || "cifra")} title="Parar e salvar gravação"><Square size={11} strokeWidth={2.6} fill="currentColor" /></button>
+    </div>
+  ) : null;
+  const recPreview = recOn && recKind === "video" ? (
+    <video ref={recPreviewRef} autoPlay muted playsInline style={S.recPreview} />
+  ) : null;
+  const overlays = <>{stageClock}{recBadge}{recPreview}</>;
 
   /* --------------------------- SESSÕES ----------------------------- */
   if (view === "sessions") {
@@ -1429,7 +1538,7 @@ export default function Palco() {
       <div className="palco-root" style={S.page}>
         <style>{CSS}</style>
         <div style={S.glow} />
-        {stageClock}
+        {overlays}
         <div className="palco-scroll" style={S.albumsWrap}>
           <button className="palco-btn palco-icon" style={S.importBack} onClick={() => setView("albums")}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Início</span></button>
           <h1 style={S.importTitle}>Sessões & Ranking</h1>
@@ -1496,7 +1605,7 @@ export default function Palco() {
       <div className="palco-root" style={S.page}>
         <style>{CSS}</style>
         <div style={S.glow} />
-        {stageClock}
+        {overlays}
         <div className="palco-scroll" style={S.albumsWrap}>
           <button className="palco-btn palco-icon" style={S.importBack} onClick={() => setView("albums")}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Início</span></button>
           {!sl ? <p style={S.emptySub}>Setlist não encontrado.</p> : (<>
@@ -1527,7 +1636,7 @@ export default function Palco() {
       <div className="palco-root" style={S.page}>
         <style>{CSS}</style>
         <div style={S.glow} />
-        {stageClock}
+        {overlays}
         <div className="palco-scroll" style={S.importWrap}>
           <div style={S.setlistViewHead}>
             <button className="palco-btn palco-icon" style={S.importBack} onClick={() => { setEditSet(null); setView(openSetId ? "setlist" : "albums"); }}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Voltar</span></button>
@@ -1591,7 +1700,7 @@ export default function Palco() {
       <div className="palco-root" style={S.page}>
         <style>{CSS}</style>
         <div style={S.glow} />
-        {stageClock}
+        {overlays}
         <div className="palco-scroll" style={S.albumsWrap}>
           <div style={S.albumsHead}>
             <Wordmark />
@@ -1613,17 +1722,21 @@ export default function Palco() {
           <div style={S.sessionCard}>
             <div style={S.sessionCardTop}><Radio size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Apresentação ao vivo</span></div>
             {session ? (
-              <div style={S.sessionRow}>
-                <span style={S.sessionLive}><span className="neon-pulse" style={S.sessionDot} /> {session.name} · <span style={{ fontFamily: FONT_MONO, fontWeight: 700, color: C.text }}>{clkLabel}</span></span>
-                <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={endSession}><Square size={15} strokeWidth={2.4} fill="#fff" /> Encerrar</button>
-              </div>
+              <>
+                <div style={S.sessionRow}>
+                  <span style={S.sessionLive}><span className="neon-pulse" style={S.sessionDot} /> {session.name} · <span style={{ fontFamily: FONT_MONO, fontWeight: 700, color: C.text }}>{clkLabel}</span></span>
+                  <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={endSession}><Square size={15} strokeWidth={2.4} fill="#fff" /> Encerrar</button>
+                </div>
+                {recOn && <div style={S.recRow}><span className="neon-pulse" style={S.recDot} /> Gravando áudio… (o arquivo é baixado ao encerrar)</div>}
+                {recError && <div style={S.recWarn}>{recError}</div>}
+              </>
             ) : (
               <div style={S.sessionRow}>
                 <input className="palco-input" style={{ ...S.input, flex: 1, minWidth: 160 }} value={sessionName} onChange={(e) => setSessionName(e.target.value)} placeholder="Nome da apresentação (ex: Bar do Zé)" onKeyDown={(e) => { if (e.key === "Enter") startSession(); }} />
                 <button className="palco-btn palco-primary" style={{ ...S.btnPrimary, background: C.red, color: "#fff" }} onClick={startSession}><Play size={16} strokeWidth={2.4} fill="#fff" /> Iniciar</button>
               </div>
             )}
-            <p style={S.sessionHint}>O cronômetro só aparece nas telas quando há apresentação rodando. Ao encerrar, o setlist e o tempo de cada música ficam salvos em <strong>Sessões</strong>.</p>
+            <p style={S.sessionHint}>Ao iniciar, o cronômetro aparece nas telas e o <strong>áudio é gravado pelo microfone</strong>. Ao encerrar, o setlist e os tempos ficam em <strong>Sessões</strong> e a <strong>gravação é baixada</strong>. (Gravar precisa de https + permissão do microfone.)</p>
           </div>
 
           <div style={S.setlistHome}>
@@ -1707,7 +1820,7 @@ export default function Palco() {
       <div className="palco-root" style={S.page}>
         <style>{CSS}</style>
         <div style={S.glow} />
-        {stageClock}
+        {overlays}
         <div className="palco-scroll" style={S.importWrap}>
           <button className="palco-btn palco-icon" style={S.importBack} onClick={() => (library.albums.length ? backToAlbums() : null)}><ChevronLeft size={18} strokeWidth={2.2} /><span style={{ marginLeft: 4 }}>Álbuns</span></button>
           <h1 style={S.importTitle}>Importar álbum</h1>
@@ -1759,7 +1872,7 @@ export default function Palco() {
   return (
     <div className="palco-root" style={S.page}>
       <style>{CSS}</style>
-      {stageClock}
+      {overlays}
       <div style={S.appShell}>
         {showSidebar && (
           <aside style={{ ...S.sidebar, width: isMobile ? "100%" : 320, borderRight: isMobile ? "none" : `1px solid ${C.borderSoft}` }}>
@@ -1836,6 +1949,12 @@ export default function Palco() {
                   </div>
                   <button className="palco-btn" style={hideTabs ? S.tabToggleOn : S.tabToggle} onClick={() => setHideTabs((v) => !v)} title={hideTabs ? "Mostrar solos e tablaturas" : "Ocultar solos/tablaturas (só letra e acordes)"}>{hideTabs ? <Eye size={15} strokeWidth={2.1} /> : <EyeOff size={15} strokeWidth={2.1} />} Solos</button>
                   {mode === "free" && <button className="palco-btn palco-ghost" style={S.tunerIcon} onClick={() => setTunerOpen(true)} title="Afinador"><Mic size={16} strokeWidth={2.1} /></button>}
+                  {recOn ? (
+                    <button className="palco-btn" style={S.recBtnOn} onClick={() => stopRecordingAndSave(selectedSong?.title || (session && session.name) || "cifra")} title="Parar e salvar gravação">{recKind === "video" ? <Video size={14} strokeWidth={2.2} /> : <Square size={14} strokeWidth={2.4} fill="#fff" />} <span style={{ fontFamily: FONT_MONO, fontWeight: 700 }}>{fmtMMSS(recSec)}</span> ■</button>
+                  ) : (<>
+                    <button className="palco-btn" style={S.recBtn} onClick={() => startRecording("audio")} title="Gravar áudio desta cifra"><Circle size={14} strokeWidth={0} fill={C.red} /> Áudio</button>
+                    <button className="palco-btn" style={S.recBtn} onClick={() => startRecording("video")} title="Gravar vídeo (câmera) — a cifra continua aberta"><Video size={14} strokeWidth={2.1} /> Vídeo</button>
+                  </>)}
                   <div style={S.toolGroup}>
                     <span style={S.toolLabel}>Tom</span>
                     <button className="palco-btn palco-icon" style={S.toolBtn} onClick={() => changeTranspose(Math.max(-11, transpose - 1))}><Minus size={14} strokeWidth={2.5} /></button>
@@ -2308,6 +2427,8 @@ const S = {
   tunerIcon: { display: "inline-flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, cursor: "pointer", flexShrink: 0 },
   tabToggle: { display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", flexShrink: 0 },
   tabToggleOn: { display: "inline-flex", alignItems: "center", gap: 6, background: C.amber, color: "#1a140a", border: `1px solid ${C.amber}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 },
+  recBtn: { display: "inline-flex", alignItems: "center", gap: 6, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 600, fontSize: 13, cursor: "pointer", flexShrink: 0 },
+  recBtnOn: { display: "inline-flex", alignItems: "center", gap: 6, background: C.red, color: "#fff", border: `1px solid ${C.red}`, borderRadius: 10, padding: "8px 12px", fontFamily: FONT_UI, fontWeight: 700, fontSize: 13, cursor: "pointer", flexShrink: 0 },
   cifraScroll: { flex: 1, overflowY: "auto", overflowX: "auto", scrollBehavior: "auto" },
   cifra: { fontFamily: FONT_MONO, padding: "24px 26px 0", maxWidth: 900, margin: "0 auto" },
   transportZone: { padding: "0 18px calc(18px + env(safe-area-inset-bottom))", flexShrink: 0, background: `linear-gradient(to top, ${C.bg} 60%, transparent)` },
@@ -2390,6 +2511,9 @@ const S = {
   clockBtn: { width: 28, height: 28, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 8, cursor: "pointer", flexShrink: 0 },
   stageClockFixed: { position: "fixed", top: "calc(env(safe-area-inset-top) + 6px)", left: "50%", transform: "translateX(-50%)", zIndex: 55, display: "flex", alignItems: "center", gap: 5, background: "rgba(20,17,13,.85)", border: `1px solid ${C.borderSoft}`, borderRadius: 99, padding: "4px 7px 4px 10px", backdropFilter: "blur(6px)", boxShadow: "0 4px 16px rgba(0,0,0,.45)" },
   stageClockBtn: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "transparent", color: C.textDim, border: "none", borderRadius: 6, cursor: "pointer", flexShrink: 0 },
+  recBadgeFixed: { position: "fixed", top: "calc(env(safe-area-inset-top) + 6px)", right: "calc(env(safe-area-inset-right) + 10px)", zIndex: 56, display: "flex", alignItems: "center", gap: 6, background: C.red, color: "#fff", borderRadius: 99, padding: "4px 6px 4px 11px", boxShadow: "0 4px 16px rgba(0,0,0,.45)", fontFamily: FONT_UI, fontSize: 12.5 },
+  recBadgeBtn: { width: 22, height: 22, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(255,255,255,.18)", color: "#fff", border: "none", borderRadius: 999, cursor: "pointer", flexShrink: 0 },
+  recPreview: { position: "fixed", bottom: "calc(env(safe-area-inset-bottom) + 12px)", right: "calc(env(safe-area-inset-right) + 12px)", width: 116, height: 154, objectFit: "cover", borderRadius: 12, border: `2px solid ${C.red}`, boxShadow: "0 6px 20px rgba(0,0,0,.5)", zIndex: 56, transform: "scaleX(-1)", background: "#000" },
   sessionDot: { width: 8, height: 8, borderRadius: "50%", background: C.red, flexShrink: 0 },
   sessionPillName: { fontSize: 12, fontWeight: 600, color: C.amber, maxWidth: 130, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
   sessionCard: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "14px 16px", marginBottom: 18, display: "flex", flexDirection: "column", gap: 10 },
@@ -2398,6 +2522,9 @@ const S = {
   sessionRow: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" },
   sessionLive: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 14, color: C.amber, fontWeight: 600, flex: 1, minWidth: 0 },
   sessionHint: { fontSize: 12, color: C.textFaint, lineHeight: 1.5, margin: 0 },
+  recRow: { display: "inline-flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 600, color: C.red },
+  recDot: { width: 9, height: 9, borderRadius: "50%", background: C.red, flexShrink: 0 },
+  recWarn: { fontSize: 12, color: "#eaa389", background: "rgba(224,104,60,.10)", border: `1px solid rgba(224,104,60,.3)`, borderRadius: 8, padding: "7px 11px" },
   sessionSecTitle: { display: "flex", alignItems: "center", gap: 8, fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 16, color: C.text, marginTop: 24 },
   rankRow: { display: "flex", alignItems: "center", gap: 12, padding: "10px 12px", borderBottom: `1px solid ${C.borderSoft}` },
   rankPos: { fontFamily: FONT_MONO, fontWeight: 700, fontSize: 15, width: 24, textAlign: "center", flexShrink: 0 },
