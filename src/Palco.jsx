@@ -334,6 +334,23 @@ function classifyLine(line) {
   return "lyric";
 }
 
+/* ------------------------ mídias (IndexedDB) ---------------------- */
+// gravações de áudio/vídeo guardadas no app (blobs grandes não cabem no localStorage)
+const IDB_NAME = "mystage", IDB_STORE = "recordings";
+function idbOpen() {
+  return new Promise((resolve, reject) => {
+    if (!window.indexedDB) { reject(new Error("sem indexedDB")); return; }
+    const req = indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => { const db = req.result; if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE, { keyPath: "id" }); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function idbSaveRec(rec) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).put(rec); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); }); }
+async function idbAllRecs() { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readonly"); const r = tx.objectStore(IDB_STORE).getAll(); r.onsuccess = () => res(r.result || []); r.onerror = () => rej(r.error); }); }
+async function idbDeleteRec(id) { const db = await idbOpen(); return new Promise((res, rej) => { const tx = db.transaction(IDB_STORE, "readwrite"); tx.objectStore(IDB_STORE).delete(id); tx.oncomplete = () => res(); tx.onerror = () => rej(tx.error); }); }
+function fmtBytes(n) { if (!n) return "0 B"; const u = ["B", "KB", "MB", "GB"]; const i = Math.min(u.length - 1, Math.floor(Math.log(n) / Math.log(1024))); return (n / Math.pow(1024, i)).toFixed(i ? 1 : 0) + " " + u[i]; }
+
 /* ------------------------ teoria musical -------------------------- */
 const SHARP = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 const FLAT  = ["C","Db","D","Eb","E","F","Gb","G","Ab","A","Bb","B"];
@@ -682,6 +699,9 @@ export default function Palco() {
   const [recPos, setRecPos] = useState(() => ({ x: (typeof window !== "undefined" ? window.innerWidth - 84 - 10 : 280), y: 110 })); // prévia à direita (arrastável)
   const recDragRef = useRef(null);
   const [confirmLeaveRec, setConfirmLeaveRec] = useState(false);   // pergunta ao tentar sair gravando
+  const [medias, setMedias] = useState([]);                        // gravações salvas (IndexedDB), desc por data
+  const [mediaUrl, setMediaUrl] = useState(null);                  // { id, url } do player aberto
+  const [pendingMediaDel, setPendingMediaDel] = useState(null);    // id aguardando confirmação de exclusão
   const [coverFor, setCoverFor] = useState(null);                  // id do álbum cuja capa está sendo editada
   const [coverUrl, setCoverUrl] = useState("");
   const coverFileRef = useRef(null);
@@ -740,6 +760,8 @@ export default function Palco() {
       try { recPreviewRef.current.srcObject = recRef.current.stream; } catch (e) {}
     }
   }, [recOn, recKind]);
+  // carrega as gravações salvas
+  useEffect(() => { (async () => { try { const all = await idbAllRecs(); setMedias(all.sort((a, b) => b.ts - a.ts)); } catch (e) {} })(); }, []);
   // pausa a gravação quando o app vai para segundo plano; avisa antes de fechar a aba
   useEffect(() => {
     if (!recOn) return;
@@ -956,6 +978,26 @@ export default function Palco() {
   const resetScroll = () => { setPlaying(false); accRef.current = 0; if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "smooth" }); };
   // força buscar a versão mais nova (burla o cache do navegador trocando a query da URL)
   const forceUpdate = () => { try { location.replace(location.origin + location.pathname + "?v=" + Date.now()); } catch (e) { location.reload(); } };
+  // mídias: tocar / baixar / apagar
+  const playMedia = (m) => {
+    if (mediaUrl) { try { URL.revokeObjectURL(mediaUrl.url); } catch (e) {} }
+    if (mediaUrl && mediaUrl.id === m.id) { setMediaUrl(null); return; } // toggle
+    try { setMediaUrl({ id: m.id, url: URL.createObjectURL(m.blob) }); } catch (e) {}
+  };
+  const downloadMedia = (m) => {
+    try {
+      const url = URL.createObjectURL(m.blob);
+      const stamp = new Date(m.ts).toISOString().slice(0, 16).replace("T", "_").replace(":", "h");
+      const a = document.createElement("a"); a.href = url; a.download = `${m.name}-${stamp}.${m.ext}`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 3000);
+    } catch (e) {}
+  };
+  const deleteMedia = (id) => {
+    if (mediaUrl && mediaUrl.id === id) { try { URL.revokeObjectURL(mediaUrl.url); } catch (e) {} setMediaUrl(null); }
+    setMedias((m) => m.filter((x) => x.id !== id)); setPendingMediaDel(null);
+    idbDeleteRec(id).catch(() => {});
+  };
 
   // --- Voltar do celular (gesto/botão): navega dentro do app em vez de fechar ---
   const navRef = useRef({});
@@ -1331,7 +1373,7 @@ export default function Palco() {
       const chunks = [];
       recorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       recorder.start(1000);
-      recRef.current = { stream, recorder, chunks, mime: recorder.mimeType || mime || (wantVideo ? "video/webm" : "audio/webm"), kind };
+      recRef.current = { stream, recorder, chunks, mime: recorder.mimeType || mime || (wantVideo ? "video/webm" : "audio/webm"), kind, startMs: Date.now() };
       recPausedRef.current = false; setRecPaused(false);
       setRecKind(kind); setRecSec(0); setRecOn(true);
     } catch (e) { setRecError(wantVideo ? "Câmera/microfone bloqueados — precisa de https e permissão." : "Microfone bloqueado — segue sem gravar (precisa de https/permissão)."); }
@@ -1349,11 +1391,15 @@ export default function Palco() {
             const ext = r.kind === "video" ? (r.mime.includes("mp4") ? "mp4" : "webm") : (r.mime.includes("mp4") ? "m4a" : r.mime.includes("ogg") ? "ogg" : "webm");
             const prefix = r.kind === "video" ? "video" : "gravacao";
             const clean = ((nm || "apresentacao").replace(/[^\w\- ]+/g, "").trim().replace(/\s+/g, "-") || "apresentacao");
+            const ts = Date.now();
             const stamp = new Date().toISOString().slice(0, 16).replace("T", "_").replace(":", "h");
             const url = URL.createObjectURL(blob);
             const a = document.createElement("a"); a.href = url; a.download = `${prefix}-${clean}-${stamp}.${ext}`;
             document.body.appendChild(a); a.click(); a.remove();
             setTimeout(() => URL.revokeObjectURL(url), 3000);
+            // guarda também nas Mídias (dentro do app)
+            const rec = { id: "rec_" + ts, name: `${prefix}-${clean}`, kind: r.kind, mime: r.mime, ext, ts, durSec: Math.round((ts - (r.startMs || ts)) / 1000), size: blob.size, blob };
+            idbSaveRec(rec).then(() => setMedias((m) => [rec, ...m])).catch(() => {});
           }
         } catch (e) {}
         stopStream();
@@ -1755,11 +1801,15 @@ export default function Palco() {
             <Wordmark />
             <div style={S.libActions}>
               <input ref={fileInputRef} type="file" accept="application/json,.json" onChange={importLibraryFile} style={{ display: "none" }} />
-              <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={triggerImport} title="Restaurar de um backup"><Upload size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Restaurar</span></button>
-              <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={exportLibrary} title="Salvar backup"><Download size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Backup</span></button>
-              <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={() => setView("sessions")} title="Histórico e ranking"><BarChart3 size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Sessões</span></button>
-              <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={forceUpdate} title="Buscar a versão mais recente do app"><RotateCw size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Atualizar</span></button>
-              <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={goImport}><FolderPlus size={18} strokeWidth={2.2} /> Importar álbum</button>
+              <div style={S.libRow}>
+                <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={triggerImport} title="Restaurar de um backup"><Upload size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Restaurar</span></button>
+                <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={exportLibrary} title="Salvar backup"><Download size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Backup</span></button>
+                <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={() => setView("sessions")} title="Histórico e ranking"><BarChart3 size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Sessões</span></button>
+              </div>
+              <div style={S.libRow}>
+                <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={forceUpdate} title="Buscar a versão mais recente do app"><RotateCw size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Atualizar</span></button>
+                <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={goImport}><FolderPlus size={18} strokeWidth={2.2} /> Importar álbum</button>
+              </div>
             </div>
           </div>
 
@@ -1838,6 +1888,41 @@ export default function Palco() {
               ))}
             </div>
           )}
+
+          <div style={{ ...S.setlistHome, marginTop: 22 }}>
+            <div style={S.sectionHead}><Video size={16} color={C.amber} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Mídias</span>{medias.length > 0 && <span style={{ ...S.iconGhostLabel, marginLeft: "auto", color: C.textFaint, fontSize: 12 }}>{medias.length} · {fmtBytes(medias.reduce((s, m) => s + (m.size || 0), 0))}</span>}</div>
+            {medias.length === 0 ? (
+              <p style={S.sessionHint}>Suas gravações de áudio e vídeo aparecem aqui — dá pra rever, baixar de novo e apagar. Elas ficam salvas neste aparelho.</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {medias.slice(0, 8).map((m) => (
+                  <div key={m.id} style={S.mediaItem}>
+                    <div style={S.mediaRow}>
+                      <span style={S.mediaIcon}>{m.kind === "video" ? <Video size={16} color={C.amber} strokeWidth={2} /> : <Mic size={16} color={C.amber} strokeWidth={2} />}</span>
+                      <span style={S.mediaMeta}><span style={S.mediaName}>{m.name}</span><span style={S.mediaSub}>{new Date(m.ts).toLocaleDateString("pt-BR")} {new Date(m.ts).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" })} · {fmtMMSS(m.durSec)} · {fmtBytes(m.size)}</span></span>
+                      <div style={S.mediaActions}>
+                        <button className="palco-btn palco-icon" style={S.mediaBtn} onClick={() => playMedia(m)} title="Reproduzir">{mediaUrl && mediaUrl.id === m.id ? <Square size={14} strokeWidth={2.3} /> : <Play size={15} strokeWidth={2.2} fill="currentColor" />}</button>
+                        <button className="palco-btn palco-icon" style={S.mediaBtn} onClick={() => downloadMedia(m)} title="Baixar"><Download size={15} strokeWidth={2.1} /></button>
+                        {pendingMediaDel === m.id ? (
+                          <>
+                            <button className="palco-btn" style={S.confirmYes} onClick={() => deleteMedia(m.id)} title="Confirmar exclusão"><Check size={13} strokeWidth={2.6} /></button>
+                            <button className="palco-btn" style={S.confirmNo} onClick={() => setPendingMediaDel(null)} title="Cancelar"><X size={13} strokeWidth={2.6} /></button>
+                          </>
+                        ) : (
+                          <button className="palco-btn palco-icon palco-trash" style={S.mediaBtn} onClick={() => setPendingMediaDel(m.id)} title="Apagar"><Trash2 size={14} strokeWidth={2} /></button>
+                        )}
+                      </div>
+                    </div>
+                    {mediaUrl && mediaUrl.id === m.id && (
+                      m.kind === "video"
+                        ? <video src={mediaUrl.url} controls autoPlay playsInline style={S.mediaPlayerVideo} />
+                        : <audio src={mediaUrl.url} controls autoPlay style={S.mediaPlayerAudio} />
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
 
           <div style={{ ...S.sessionCard, marginTop: 22 }}>
             <div style={S.sessionCardTop}><Radio size={16} color={C.red} strokeWidth={2.2} /><span style={S.sessionCardTitle}>Apresentação ao vivo</span></div>
@@ -2454,7 +2539,8 @@ const S = {
   glow: { position: "absolute", top: -200, left: "50%", transform: "translateX(-50%)", width: 700, height: 500, background: `radial-gradient(ellipse at center, ${C.bgGlow} 0%, transparent 70%)`, pointerEvents: "none" },
   albumsWrap: { position: "relative", maxWidth: 980, margin: "0 auto", padding: "calc(44px + env(safe-area-inset-top)) 24px 64px", height: "100%", overflowY: "auto", zIndex: 1 },
   albumsHead: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, flexWrap: "wrap", marginBottom: 18 },
-  libActions: { display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap" },
+  libActions: { display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8 },
+  libRow: { display: "flex", alignItems: "center", gap: 9, flexWrap: "wrap", justifyContent: "flex-end" },
   iconGhost: { display: "inline-flex", alignItems: "center", gap: 7, background: C.surface, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 10, padding: "9px 13px", fontFamily: FONT_UI, fontWeight: 500, fontSize: 13.5, cursor: "pointer" },
   iconGhostLabel: { fontSize: 13.5 },
   searchWrap: { display: "flex", alignItems: "center", gap: 9, background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 12, padding: "0 12px", marginBottom: 18 },
@@ -2577,6 +2663,16 @@ const S = {
   tunerTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, color: C.text },
   tunerSection: { background: `linear-gradient(160deg, ${C.surface}, ${C.surface2})`, border: `1px solid ${C.border}`, borderRadius: 16, padding: "14px 16px 12px", marginBottom: 18, boxShadow: "0 8px 26px rgba(0,0,0,.28)" },
   tunerSectionSlim: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 14px", marginBottom: 18 },
+  mediaItem: { background: C.surface, border: `1px solid ${C.borderSoft}`, borderRadius: 12, padding: "8px 10px" },
+  mediaRow: { display: "flex", alignItems: "center", gap: 10 },
+  mediaIcon: { width: 32, height: 32, borderRadius: 9, background: "rgba(240,168,51,.10)", border: `1px solid rgba(240,168,51,.28)`, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0 },
+  mediaMeta: { display: "flex", flexDirection: "column", minWidth: 0, flex: 1 },
+  mediaName: { fontSize: 14, fontWeight: 600, color: C.text, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" },
+  mediaSub: { fontSize: 11.5, color: C.textFaint },
+  mediaActions: { display: "flex", alignItems: "center", gap: 5, flexShrink: 0 },
+  mediaBtn: { width: 32, height: 32, display: "flex", alignItems: "center", justifyContent: "center", background: C.surface2, color: C.textDim, border: `1px solid ${C.borderSoft}`, borderRadius: 8, cursor: "pointer" },
+  mediaPlayerVideo: { width: "100%", maxHeight: 340, marginTop: 9, borderRadius: 10, background: "#000", display: "block" },
+  mediaPlayerAudio: { width: "100%", marginTop: 9, display: "block" },
   buildFooter: { textAlign: "center", fontSize: 11.5, color: C.textFaint, marginTop: 26, paddingBottom: 6 },
   buildLink: { background: "none", border: "none", color: C.amber, fontSize: 11.5, cursor: "pointer", padding: 0, textDecoration: "underline" },
   tunerReadout: { fontSize: 15, color: C.textDim, minHeight: 20, marginTop: -2 },
