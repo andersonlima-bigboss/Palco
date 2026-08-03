@@ -953,6 +953,8 @@ export default function Palco() {
     setTimeout(() => setSelected(pos), 0);
   };
   const resetScroll = () => { setPlaying(false); accRef.current = 0; if (scrollRef.current) scrollRef.current.scrollTo({ top: 0, behavior: "smooth" }); };
+  // força buscar a versão mais nova (burla o cache do navegador trocando a query da URL)
+  const forceUpdate = () => { try { location.replace(location.origin + location.pathname + "?v=" + Date.now()); } catch (e) { location.reload(); } };
 
   // --- Voltar do celular (gesto/botão): navega dentro do app em vez de fechar ---
   const navRef = useRef({});
@@ -1741,6 +1743,7 @@ export default function Palco() {
               <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={triggerImport} title="Restaurar de um backup"><Upload size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Restaurar</span></button>
               <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={exportLibrary} title="Salvar backup"><Download size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Backup</span></button>
               <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={() => setView("sessions")} title="Histórico e ranking"><BarChart3 size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Sessões</span></button>
+              <button className="palco-btn palco-ghost" style={S.iconGhost} onClick={forceUpdate} title="Buscar a versão mais recente do app"><RotateCw size={16} strokeWidth={2.1} /><span style={S.iconGhostLabel}>Atualizar</span></button>
               <button className="palco-btn palco-primary" style={S.btnPrimary} onClick={goImport}><FolderPlus size={18} strokeWidth={2.2} /> Importar álbum</button>
             </div>
           </div>
@@ -1840,6 +1843,8 @@ export default function Palco() {
             )}
             <p style={S.sessionHint}>Ao iniciar, o cronômetro aparece nas telas e o <strong>áudio é gravado pelo microfone</strong>. Ao encerrar, o setlist e os tempos ficam em <strong>Sessões</strong> e a <strong>gravação é baixada</strong>. (Gravar precisa de https + permissão do microfone.)</p>
           </div>
+
+          <div style={S.buildFooter}>MyStage · versão {__BUILD__} · <button className="palco-btn" style={S.buildLink} onClick={forceUpdate}>Atualizar app</button></div>
         </div>
         {renameModal}
         {coverModal}
@@ -2557,6 +2562,8 @@ const S = {
   tunerTitle: { fontFamily: FONT_DISPLAY, fontWeight: 600, fontSize: 18, color: C.text },
   tunerSection: { background: `linear-gradient(160deg, ${C.surface}, ${C.surface2})`, border: `1px solid ${C.border}`, borderRadius: 16, padding: "14px 16px 12px", marginBottom: 18, boxShadow: "0 8px 26px rgba(0,0,0,.28)" },
   tunerSectionSlim: { background: C.surface, border: `1px solid ${C.border}`, borderRadius: 14, padding: "12px 14px", marginBottom: 18 },
+  buildFooter: { textAlign: "center", fontSize: 11.5, color: C.textFaint, marginTop: 26, paddingBottom: 6 },
+  buildLink: { background: "none", border: "none", color: C.amber, fontSize: 11.5, cursor: "pointer", padding: 0, textDecoration: "underline" },
   tunerReadout: { fontSize: 15, color: C.textDim, minHeight: 20, marginTop: -2 },
   tunerStrip: { display: "flex", flexWrap: "wrap", justifyContent: "center", gap: "6px 12px", width: "100%", maxWidth: 340, fontFamily: FONT_MONO, fontSize: 14 },
   tunerStripNote: { transition: "all .12s ease", minWidth: 20 },

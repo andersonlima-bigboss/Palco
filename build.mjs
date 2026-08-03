@@ -71,7 +71,7 @@ const inlinePlugin = {
 const options = {
   entryPoints: ["src/main.jsx"],
   bundle: true, minify: true, format: "iife",
-  define: { "process.env.NODE_ENV": '"production"' },
+  define: { "process.env.NODE_ENV": '"production"', "__BUILD__": JSON.stringify(new Date().toISOString().slice(0, 16).replace("T", " ")) },
   outfile: "dist/app.js", write: false,
   loader: { ".jsx": "jsx" },
   plugins: [inlinePlugin],
